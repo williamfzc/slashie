@@ -41,6 +41,13 @@ pub fn error(msg: impl Into<String>) -> String {
     msg.into()
 }
 
+/// The validated configuration plus any intake-blocking fault, as returned
+/// by `Config::load_or_create`.
+pub struct LoadedConfig {
+    pub config: Config,
+    pub fault: Option<String>,
+}
+
 /// `--poll on|off` control invocation: update the persisted polling setting
 /// under the lock, then exit. Identity binding and intake recovery still
 /// happen on the next full startup.
@@ -57,35 +64,25 @@ pub fn apply_poll_control(home: &PathBuf, on: bool) -> Result<bool, String> {
 }
 
 impl Runtime {
-    /// Full startup: home dir, config (create default on new install), state,
-    /// identity binding, pending-claim recovery, poll override. A missing or
-    /// invalid state after initialization blocks intake (DESIGN.md).
+    /// Full startup: state, identity binding, pending-claim recovery, poll
+    /// override. The caller loads or creates config.json first so the chosen
+    /// transport can be built from it. A missing or invalid state after
+    /// initialization blocks intake (DESIGN.md).
     pub fn init(
         home: PathBuf,
+        loaded: LoadedConfig,
         transport: Arc<dyn Transport>,
         identity: String,
         shutdown: Arc<AtomicBool>,
         logger: Arc<Logger>,
         poll_override: Option<bool>,
     ) -> Result<Runtime, String> {
+        let LoadedConfig {
+            config,
+            fault: config_fault,
+        } = loaded;
         std::fs::create_dir_all(&home)
             .map_err(|e| error(format!("cannot create runtime dir {}: {}", home.display(), e)))?;
-
-        let (config, config_fault) = match std::fs::read_to_string(home.join("config.json")) {
-            Ok(text) => match Config::parse(&text) {
-                Ok(c) => (c, None),
-                Err(e) => (Config::default(), Some(e.to_string())),
-            },
-            Err(_) => {
-                let c = Config::default();
-                crate::config::atomic_write(
-                    &home.join("config.json"),
-                    &serde_json::to_string_pretty(&c).unwrap(),
-                )
-                .map_err(|e| error(format!("cannot create config.json: {}", e)))?;
-                (c, None)
-            }
-        };
 
         let (state, state_fault) = match load_or_init(&home) {
             Ok(StateLoad::Created(s)) => (s, None),
@@ -482,6 +479,7 @@ mod tests {
         let logger = Arc::new(Logger::new(&home, false));
         let rt = Runtime::init(
             home.clone(),
+            LoadedConfig { config: Config::default(), fault: None },
             mock.clone(),
             "ou_self".into(),
             shutdown,
@@ -502,8 +500,11 @@ mod tests {
             behavior: Default::default(),
         }));
         let logger = Arc::new(Logger::new(&home, false));
+        let (cfg, fault) = Config::load_or_create(&home).unwrap();
+        assert_eq!(fault, None, "fresh install has no config fault");
         let rt = Runtime::init(
             home.clone(),
+            LoadedConfig { config: cfg, fault: None },
             mock.clone(),
             "ou_self".into(),
             Arc::new(AtomicBool::new(false)),
@@ -635,6 +636,7 @@ mod tests {
         let logger = Arc::new(Logger::new(&home, false));
         let rt = Runtime::init(
             home.clone(),
+            LoadedConfig { config: Config::default(), fault: None },
             mock.clone(),
             "ou_self".into(),
             Arc::new(AtomicBool::new(false)),
@@ -723,6 +725,7 @@ mod tests {
         let logger = Arc::new(Logger::new(&home, false));
         Runtime::init(
             home.clone(),
+            LoadedConfig { config: Config::default(), fault: None },
             mock.clone(),
             "ou_self".into(),
             Arc::new(AtomicBool::new(false)),
@@ -734,6 +737,7 @@ mod tests {
         let logger2 = Arc::new(Logger::new(&home, false));
         let rt2 = Runtime::init(
             home.clone(),
+            LoadedConfig { config: Config::default(), fault: None },
             mock.clone(),
             "ou_someone_else".into(),
             Arc::new(AtomicBool::new(false)),
@@ -758,6 +762,7 @@ mod tests {
         let logger = Arc::new(Logger::new(&home, false));
         let rt = Runtime::init(
             home.clone(),
+            LoadedConfig { config: Config::default(), fault: None },
             mock.clone(),
             "ou_self".into(),
             Arc::new(AtomicBool::new(false)),
@@ -774,6 +779,8 @@ mod tests {
     fn invalid_config_blocks_intake() {
         let home = test_home("badconfig");
         std::fs::write(home.join("config.json"), "{\"poll_interval\": 15}").unwrap();
+        let (_, fault) = Config::load_or_create(&home).unwrap();
+        assert!(fault.is_some(), "invalid config yields a fault");
         let mock = Arc::new(MockTransport::new(MockFixture {
             self_open_id: "ou_self".into(),
             messages: vec![],
@@ -782,6 +789,7 @@ mod tests {
         let logger = Arc::new(Logger::new(&home, false));
         let rt = Runtime::init(
             home.clone(),
+            LoadedConfig { config: Config::default(), fault },
             mock.clone(),
             "ou_self".into(),
             Arc::new(AtomicBool::new(false)),
@@ -858,6 +866,7 @@ mod tests {
         let logger = Arc::new(Logger::new(&home, false));
         Runtime::init(
             home.clone(),
+            LoadedConfig { config: Config::default(), fault: None },
             mock.clone(),
             "ou_self".into(),
             Arc::new(AtomicBool::new(false)),
@@ -873,6 +882,7 @@ mod tests {
         let logger2 = Arc::new(Logger::new(&home, false));
         Runtime::init(
             home.clone(),
+            LoadedConfig { config: Config::default(), fault: None },
             mock.clone(),
             "ou_self".into(),
             Arc::new(AtomicBool::new(false)),

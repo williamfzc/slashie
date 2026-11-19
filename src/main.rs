@@ -3,6 +3,7 @@
 //! land after the slice passes review (DESIGN.md "Desktop build").
 
 mod config;
+mod lark;
 mod lock;
 mod logging;
 mod runtime;
@@ -118,6 +119,11 @@ fn main() {
         libc::signal(libc::SIGTERM, handler);
     }
 
+    // Load (or create) configuration before choosing the transport so both
+    // launch paths share the same config file and validator.
+    let (config, config_fault) =
+        config::Config::load_or_create(&home).unwrap_or_else(|e| fail(&format!("cannot read config.json: {}", e)));
+
     let (transport, identity): (Arc<dyn transport::Transport>, String) = match &mock_path {
         Some(path) => {
             let text = std::fs::read_to_string(path)
@@ -137,14 +143,34 @@ fn main() {
             println!("polling set to {}", if ok { "on" } else { "off" });
             return;
         }
-        None => fail(
-            "the real Lark CLI adapter is follow-up scope; this slice requires --mock <fixture>",
-        ),
+        None => {
+            let cli = config.lark_cli.clone().unwrap_or_else(|| {
+                fail(
+                    "config.json has no lark_cli section; set lark_cli.path and \
+                     lark_cli.profile to your Lark CLI executable and profile",
+                )
+            });
+            let lark = Arc::new(lark::LarkCliTransport::new(
+                &cli,
+                &config.process_path,
+                shutdown.clone(),
+            ));
+            let id = lark.verify_identity().unwrap_or_else(|e| {
+                fail(&format!("identity verification failed: {} (operator action required)", e))
+            });
+            lark.set_self_id(&id);
+            let t: Arc<dyn transport::Transport> = lark;
+            (t, id)
+        }
     };
 
     let logger = Arc::new(logging::Logger::new(&home, true));
     let rt = runtime::Runtime::init(
         home,
+        runtime::LoadedConfig {
+            config,
+            fault: config_fault,
+        },
         transport,
         identity,
         shutdown.clone(),

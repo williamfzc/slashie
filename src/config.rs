@@ -141,6 +141,26 @@ impl Config {
         validate(&cfg)?;
         Ok(cfg)
     }
+
+    /// Load config.json, creating the default (fixed /ping) on a new
+    /// installation. Returns the config plus any fault for intake blocking.
+    pub fn load_or_create(home: &std::path::Path) -> Result<(Config, Option<String>), std::io::Error> {
+        match std::fs::read_to_string(home.join("config.json")) {
+            Ok(text) => match Config::parse(&text) {
+                Ok(c) => Ok((c, None)),
+                Err(e) => Ok((Config::default(), Some(e.to_string()))),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let c = Config::default();
+                atomic_write(
+                    &home.join("config.json"),
+                    &serde_json::to_string_pretty(&c).unwrap(),
+                )?;
+                Ok((c, None))
+            }
+            Err(e) => Err(e),
+        }
+    }
 }
 
 /// Atomically persist JSON text: write temp file, sync, rename, sync dir.
