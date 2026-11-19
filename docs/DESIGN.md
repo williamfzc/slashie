@@ -1,252 +1,96 @@
-# slashie 技术设计
+---
+type: design
+title: Slashie technical design
+description: Shared Rust runtime, constrained Feishu adapter, and durable claims.
+---
 
-## 1. 产品概述
+# Slashie technical design
 
-slashie 把飞书消息变成本机命令的触发器：发 `/前缀 内容`，本机执行，结果回帖到原消息。用 lark-cli 的本人凭据轮询搜索实现，不建机器人、不加群、不依赖别人授权。产品目标、场景与路线图见 [product.md](product.md)。
+The [product specification](product.md) owns user-visible behavior. The [menu bar specification](menu-bar.md) owns native menu interactions and copy.
 
-## 2. 设计原则
+## Runtime
 
-1. **内核无界面**：`src/runtime` 不依赖任何 UI。菜单栏只是外壳；换掉菜单栏、改成窗口或 systemd 都不动内核，改轮询逻辑也不用碰界面。
-2. **本人身份、最小动作**：只用 lark-cli 的本人 user token，只调「搜索」和「回帖」两个动作；轮询频率克制，出错退避，不硬轮。
-3. **消息幂等**：一条消息至多执行一次。先占位再执行，崩溃最多丢触发，绝不双帖。
-4. **子进程可观测、可终止**：stdout / stderr 分开收、独立临时文件、独立进程组，超时杀干净，不留孤儿。
-5. **默认不做向后兼容**：配置与状态结构按当前需求设计，不预留未使用的兼容字段。
+Use one Rust package and one in-process runtime. Both launch modes share configuration, the real user's `~/.slashie/` directory, and an exclusive OS lock on a stable `app.lock`. Hold the lock until shutdown and close its descriptor on subprocess exec. `slashie` launches the runtime. `lark-cli` provides external Feishu access.
 
-## 3. 系统架构
+| Owner | Responsibility |
+| --- | --- |
+| `src/main.rs` | Parse arguments, acquire the lock, and start the selected host. |
+| `src/app` | Run Tauri on the macOS main thread. Render runtime status, submit controls, and host Settings. |
+| `src/runtime` | Coordinate scans, claims, and a serial worker. Own private storage, transport, and process adapters. |
 
-```
-┌──────────────┐  菜单栏控制    ┌─────────────────────────────┐
-│   src/app    │ ────────────▶ │  src/main.rs                 │
-│ (tauri, Mac) │               │  单实例检查 → 选运行形态        │
-└──────────────┘               │  菜单栏 / --headless          │
-                               └──────────────┬──────────────┘
-                                              │ 公开接口：engine / config / poller
-                              ┌───────────────▼──────────────┐
-                              │  src/runtime（内核，无 UI）     │
-                              │                              │
-                              │  poller → matcher → queue →   │
-                              │  executor → replier           │
-                              │        ↘ state（claim-first） │
-                              └────────┬─────────────┬───────┘
-                                       │             │
-                                lark-cli（本人凭据）  /bin/sh -c
-                                       │             │
-                                 飞书 OpenAPI      本机命令
-```
+Give each host a control handle for status, polling changes, and shutdown. A coordinator serializes state transitions. Search and the worker's command and reply I/O run off the UI thread, so controls can take effect while a subprocess is waiting.
 
-| 模块 | 职责 | 依赖 |
-|---|---|---|
-| `src/main.rs` | 单实例检查、决定跑菜单栏还是无界面常驻 | 无 |
-| `src/app` | 菜单栏图标、状态文案、开关 / 间隔 / 配置 / 日志入口 | tauri（仅 Mac 编译） |
-| `src/runtime` | 轮询、匹配、执行队列、回帖、状态管理 | lark-cli、`/bin/sh` |
+### Launch and shutdown
 
-## 4. 平台依赖（已核实）
+The macOS bundle starts in menu-bar mode. `--headless` selects foreground mode before Tauri initializes. A headless build uses foreground mode by default. `--help` and `--version` exit before opening runtime files. An optional headless startup argument, `--poll on|off`, updates the same persisted polling setting as the menu. Apply it under the lock. A headless lock conflict reports an error and exits.
 
-| 依赖 | 事实 | 对设计的影响 |
-|---|---|---|
-| `POST /open-apis/search/v2/message` | 配额 1000 次/分、50 次/秒；`query` 必填；支持 `from_ids` 过滤；需 user_access_token + `search:message` | 20s 一轮远低于配额；每个前缀一次关键词查询，路由多时线性增长仍无忧；仍须带退避 |
-| `POST /open-apis/im/v1/messages/:message_id/reply` | 本人身份回帖 | 结果落原消息下；需 `im:message.send_as_user` |
-| lark-cli | 本人凭据托管 | 换机器可能缺权限，需补授权 |
-| `im.message.receive_v1`（仅备选路线） | 群聊默认只推 @机器人；单聊全量推送；机器人自身消息不推 | 见 §11 演进方向，当前设计不依赖 |
+Menu Quit and headless SIGINT/SIGTERM request shared shutdown. Stop intake, cancel active Feishu calls, terminate and reap the active command group, and release the lock after cleanup. Abandoned claims remain consumed. Canceling a request after Feishu may have accepted it leaves delivery uncertain.
 
-## 5. 核心链路
+### Desktop build
 
-| 步骤 | 做什么 | 关键设计 |
-|---|---|---|
-| 扫描 | 每 interval 秒搜本人最近消息（每个路由一次 query，`from_ids` = 自己） | 游标式回看：窗口 = min(距上次扫描成功, 30 分钟)，首次启动只回看 5 分钟 |
-| 占位 | 命中的消息 ID 写进 state，状态 `claimed`（tmp + rename 原子写） | 先占位后执行：崩溃最多丢触发，绝不双帖 |
-| 匹配 | 剥尾巴、前缀最长优先、边界校验 | 同时过自触发防护（§6.2）；不匹配则移除占位 |
-| 造上下文 | 拼来源说明：消息链接、消息 ID、会话名、发送人 | 链接必须进命令参数，不能只躺在环境变量里 |
-| 入队 | 丢进并发 1 的执行队列 | 执行不阻塞轮询，长命令不拖慢扫描节奏 |
-| 执行 | `/bin/sh -c`，独立进程组，stdin 空管道 | stdout / stderr 各自独立临时文件（mktemp）；超时杀进程组（§6.3） |
-| 回帖 | 成功回 stdout；失败回错误原因 | 超上限截断 +「完整输出见 ~/.slashie」 |
-| 收尾 | 占位更新为 `done` / `failed` | 非终态记录保留供诊断 |
+Use Tauri 2 for the macOS shell. Enable `tray` only in native macOS builds. Gate the adapter, Tauri, and the optional `tauri-build` dependency and invocation behind that feature. The bundle uses `LSUIElement` and a native icon. Open the single Settings window on demand from bundled local assets. Reuse the WebKit runtime already linked by the desktop binary. The window bridge can read and save settings and open the fixed log path. A pure headless artifact excludes the GUI dependency graph at build time. [Cargo features](https://doc.rust-lang.org/cargo/reference/features.html) · [Tauri tray](https://v2.tauri.app/learn/system-tray/) · [Tauri macOS bundling](https://v2.tauri.app/distribute/macos-application-bundle/)
 
-## 6. 关键机制
+| Artifact | Build and acceptance |
+| --- | --- |
+| macOS bundle | `cargo tauri build --features tray --bundles app`. Run the [menu acceptance checks](menu-bar.md#acceptance) on the installed bundle. |
+| Headless binary | `cargo build --release --no-default-features`. Inspect `cargo tree --no-default-features --edges normal,build` for GUI dependencies. Build and run on Linux without a display session. |
+| Shared runtime | Run the same controlled search and `/ping` cases through both macOS launch modes. Check lock contention and verify that switching modes preserves the polling setting and durable claims. |
 
-### 6.1 轮询与退避
+For v1.2, use a systemd user service under the authorized account. Invoke the foreground binary with the saved polling setting. Use `KillMode=mixed` and allow shared shutdown to finish within the stop timeout. Restart on unexpected failures. A lock conflict or unrecoverable startup fault requires operator action. Validate service credential access separately before promising operation outside a login session. [systemd service lifecycle](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html) · [systemd kill modes](https://www.freedesktop.org/software/systemd/man/latest/systemd.kill.html)
 
-- 默认间隔 20s，可配 10/20/30/60；菜单栏与配置热更新即时生效。
-- **游标持久化**：state 存最后扫描成功的时间戳。睡眠、停机、进程退出数小时，恢复后从游标接着扫，不漏消息（取代「interval × 10」固定窗口）。
-- **指数退避**：连续失败（限流 / 网络 / token 失效）按 1→2→4→…→上限 5 分钟退避；菜单栏状态亮「退避中：原因」，恢复成功即回正常节奏。
-- **频率保险丝**：每分钟触发执行数超阈值（默认 10）则熔断本轮并告警。这是自触发环路的最后一道闸。
+## Feishu adapter
 
-### 6.2 前缀匹配与自触发防护
+Use an explicit Lark CLI profile and `--as user`. Verify the authorized user's `open_id` and persist the binding. A changed identity blocks intake and delivery. The operator must restore the expected identity. CLI version 1.0.68 is the local inspection baseline. Pin the shipping version after live acceptance.
 
-匹配规则（沿用已验证行为）：
+| Operation | Contract |
+| --- | --- |
+| Search | Call raw `POST /open-apis/im/v1/messages/search` with `filter.from_ids` and a fixed RFC 3339 `filter.time_range` for the scan. Read IDs from `data.items[].meta_data.message_id`. Follow `has_more` and `page_token`. Use one strategy that passes recall tests in the release account. Try a sender-and-time search with an empty query first, then test configured-prefix queries if needed. |
+| Read details | Batch up to 50 IDs through raw `GET /open-apis/im/v1/messages/mget`. Decode `body.content`, verify sender and creation time locally, and use the verified meanings of `root_id` and `parent_id` to admit original messages only. Validate the response shape and skip unclassifiable placement. |
+| Source | Use a verified message link if available, then a conversation link if available. Always include the message ID. |
+| Reply | Call `im +messages-reply --as user` with the source message ID, literal text, verified placement, and an idempotency key derived from the source ID. Use one adapter attempt. A confirmed reply returns a reply ID. Distinguish definitive rejection from uncertain delivery. |
 
-- 剥掉「（由豆包工作发送）」类尾巴；strip 规则进配置列表，不写死某个工具
-- 前缀最长优先；前缀后必须跟空格或结束，`/doubaoX`、`/pingpong` 不误触
+The search shortcut projects out placement fields and can report successful exit with IDs only if detail retrieval fails. Use the raw adapter and validate the CLI envelope and required fields. An incomplete result or missing page blocks admission from that scan. Release requires live tests for search recall, original versus reply classification, reply placement, timestamps, permissions, and text that resembles mentions. [Pinned CLI search](https://github.com/larksuite/cli/blob/v1.0.68/shortcuts/im/im_messages_search.go) · [Pinned CLI conversion](https://github.com/larksuite/cli/blob/v1.0.68/shortcuts/im/convert_lib/content_convert.go) · [Lark CLI reply reference](https://github.com/larksuite/cli/blob/main/skills/lark-im/references/lark-im-messages-reply.md)
 
-自触发防护：slashie 的回帖本身也是「本人发出的消息」，下一轮会被搜到；若回帖内容恰好以某前缀开头（agent 回显命令、代码块首行），理论上成环。三道保险全上：
+## Polling and claims
 
-1. **只触发非回复消息**：`root_id` 为空才候选。以回复形式发命令的需求真实出现时，再放宽为「只排除 slashie 自己发出的回复」
-2. **自身回帖排除名单**：slashie 回帖的 message_id 写进 state，永不触发
-3. **频率保险丝**：见 §6.1，环路即使漏防也会被熔断
+- At the configured polling interval, start at most one scan with a fixed end time. Look back at most five minutes and locally require creation after the current start or resume time, even when the search API uses coarser timestamps. Retry transient scan failures with exponential backoff up to five minutes, honoring a longer server retry delay if supplied. Clear backoff on a complete scan. Authentication and local state faults require operator action.
+- Merge duplicate IDs and consider eligible messages in creation order, with message ID as the tiebreaker. Split at the first whitespace and do an exact prefix lookup. Preserve the internal line breaks of the remaining input. Exclude all replies using the validated Feishu placement rules.
+- Run one worker with at most 10 waiting jobs. Reserve space, then durably claim the message ID before handing it off. Leave candidates unclaimed when the queue is full so a later scan can find them within the window. The worker finishes a command and its reply attempt before taking the next job.
+- Keep pending and settled claims keyed by message ID. Settle each claim after its command and reply attempt. On restart, report pending claims as interrupted and settle them before pruning or polling. Replace state atomically using a synced file and directory. Missing or invalid state after initialization blocks intake.
+- Keep unsettled claims and settled claims inside the current scan horizon. Persist a nondecreasing pruning cutoff, and never scan before it. Pause and claim updates are serialized. Resume sets a new time boundary, and a pause invalidates results from a scan already in flight.
 
-### 6.3 执行器
+## Command execution
 
-- **队列并发 1**：同一时刻只有一条命令在跑，「串行」是明确契约而不是隐式假设；轮询节奏不受长命令影响。
-- **stdin 空管道**：不用 `/dev/null`——豆包 CLI 拒收并报「无法以 UTF-8 格式读取标准输入」。
-- **进程组终止**：子进程设独立进程组（`CommandExt::process_group(0)`）。超时先对整组 SIGTERM，2s 后仍存活再 SIGKILL 整组——`sh -c` 只杀 shell 会把 agent CLI 及其子进程留成孤儿。
-- **独立暂存**：每条命令独立 mktemp 文件收 stdout / stderr，收尾删除。固定文件名（`_out.tmp`）在执行时间重叠时互踩，已废弃。
-- 工作目录 `routes[].dir`，默认家目录。
+Run the trusted route program with `/bin/sh -c`. Pass message data through quoted `SLASHIE_ARGS` or `SLASHIE_PROMPT` values. The prompt is the argument text, a blank line, and the source. The shell program comes entirely from the local configuration.
 
-### 6.4 回帖与通知
+Close the command's stdin pipe writer to signal EOF. Give each subprocess its own Unix process group. Apply a bounded deadline to Feishu calls and each route's configured timeout to its command. On timeout, shutdown, or ordinary exit with surviving group members, send SIGTERM to the group, wait up to two seconds, then SIGKILL remaining members. Reap the direct child. A child that leaves the group is outside this guarantee. Bound the final pipe drain in case a detached child holds a pipe open. [Rust Unix process groups](https://doc.rust-lang.org/std/os/unix/process/trait.CommandExt.html#tymethod.process_group)
 
-- 成功：只回 stdout。截断上限默认 4000 字符（可配），截断时末尾追加「…已截断，完整输出见 ~/.slashie」。
-- 失败（非零退出 / 超时）：回 stderr 摘要；stderr 为空时回落 stdout。
-- 通知（已决策）：仅基础设施故障——回帖失败、token 失效、限流熔断、单实例冲突。命令失败不发通知，失败回帖本身在飞书可见。Mac 用系统通知，授权一次。
+Drain stdout and stderr concurrently and keep at most 64 KiB of each in memory. Send the outcome text described in the [product contract](product.md#trigger-and-reply). For diagnostics use stderr, then stdout if stderr is empty. Limit the complete reply to 4,000 Unicode characters and the verified API byte limit, including any truncation notice. Persist only operational metadata. Log command exit or timeout separately from reply sent, rejected, or uncertain.
 
-### 6.5 状态与去重（state.json）
+## Configuration and files
+
+Read and validate configuration once at launch. Resolve the Lark CLI executable and profile explicitly. Give both hosts the same subprocess `PATH`. Add the Node directory if the installed Lark CLI is an npm wrapper. On a new installation, create a configuration with `/ping` and initialize state with polling paused. [Tauri bundle environment](https://v2.tauri.app/distribute/macos-application-bundle/) · [Lark CLI npm entry point](https://github.com/larksuite/cli/blob/main/package.json)
 
 ```json
 {
-  "cursor": "2026-11-19T12:00:00+08:00",
-  "processed": [
-    { "id": "om_xxx", "status": "claimed", "ts": 1763520000 },
-    { "id": "om_yyy", "status": "done", "ts": 1763520010, "posted": "om_zzz" }
-  ],
-  "own_replies": ["om_zzz"]
-}
-```
-
-- 处理前写 `claimed`，完成后更新 `done` / `failed`。重启时遗留 `claimed` 记 warning 并视为已处理——宁可丢一条（自然重发），不双帖。
-- `posted` / `own_replies` 记录自己发出的回帖 ID，供自触发防护排除。
-- 上限 2000 条，FIFO 淘汰；写入一律 tmp + rename 原子替换。
-- 启动时校验 JSON；坏档则备份为 `state.json.bak` 后重建。坏档会丢一轮自触发排除名单，由频率保险丝兜底。
-
-### 6.6 单实例
-
-- `~/.slashie/app.pid` 固定在真实家目录，与配置目录无关；两份进程抢同一条消息会各回一次，必须挡住。
-- 锁内容含 PID + 进程启动时间：启动时间与 `app.pid` 记录不符视为陈锁（PID 复用假活），直接接管。
-
-## 7. 配置模型（~/.slashie/config.json）
-
-首次启动自动生成并回填身份。
-
-```json
-{
-  "poll": { "enabled": true, "interval": 20 },
-  "chats": [],
-  "notify": { "infra_failure": true },
-  "reply": { "max_chars": 4000 },
-  "strip_patterns": ["（由豆包工作发送）"],
+  "lark_cli": { "path": "/absolute/path/to/lark-cli", "profile": "default" },
+  "process_path": ["/usr/bin", "/bin", "/usr/sbin", "/sbin"],
+  "poll_interval": 20,
   "routes": [
-    { "prefix": "/ping", "cmd": "echo pong {args}", "dir": "~", "timeout": 10, "silent": false },
-    { "prefix": "/doubao", "cmd": "doubao \"$SLASHIE_PROMPT\"", "dir": "~/workspace", "timeout": 300, "silent": false }
+    { "prefix": "/ping", "cmd": "echo pong" }
   ]
 }
 ```
 
-| 字段 | 含义 | 默认 |
-|---|---|---|
-| `poll.enabled` | 轮询开关 | `true` |
-| `poll.interval` | 扫描间隔（秒） | `20` |
-| `chats` | 会话白名单（`oc_xxx` 列表），空 = 全部会话可用 | `[]` |
-| `notify.infra_failure` | 基础设施故障系统通知 | `true` |
-| `reply.max_chars` | 回帖截断上限（字符） | `4000` |
-| `strip_patterns` | 回帖尾巴剥离规则列表 | `["（由豆包工作发送）"]` |
-| `routes[].prefix` | 斜杠命令 | `/ping` |
-| `routes[].cmd` | 交给 `sh` 的命令 | `echo pong {args}` |
-| `routes[].dir` | 工作目录 | 家目录 |
-| `routes[].timeout` | 超时秒数，到点杀进程组并回已有输出 | `30` |
-| `routes[].silent` | 只执行不回帖 | `false` |
+`poll_interval` is 10, 20, 30, or 60 seconds and defaults to 20. Each prefix is a unique slash-prefixed token. Each `cmd` is a nonempty shell program. An optional route `dir` is an absolute path or starts with `~/`. It defaults to the user's home directory. An optional `timeout` is a positive integer in seconds, defaulting to 30. `process_path` contains ordered absolute directories and defaults to the example.
 
-### 占位符与环境变量
+| File | Source of truth |
+| --- | --- |
+| `config.json` | Polling interval, CLI and path settings, and route definitions. Restart after edits. |
+| `state.json` | Polling setting, identity binding, pruning cutoff, and consumed IDs. |
+| `app.lock` | Instance ownership via a held descriptor. |
+| `slashie.log` | Timestamps, IDs, durations, and outcomes. Rotate at 2 MiB and keep one previous log. |
 
-| 占位符 | 环境变量 | 内容 |
-|---|---|---|
-| `{args}` | `SLASHIE_ARGS` | 剥掉前缀后的全部内容 |
-| `{text}` | `SLASHIE_TEXT` | 消息完整原文（含前缀） |
-| `{link}` | `SLASHIE_LINK` | 这条消息的链接，拿不到时回落成会话链接 |
-| `{id}` | `SLASHIE_ID` | 消息 ID（`om_xxx`） |
-| `{context}` | `SLASHIE_CONTEXT` | 来源说明：链接、ID、会话、发送人 |
-| `{prompt}` | `SLASHIE_PROMPT` | 内容 + 空行 + 来源说明，直接丢给 agent |
+Settings and headless use the same configuration schema and validator. Save atomically and preserve fields the window does not edit. If the file changed since the window loaded it, reject the save and ask the user to reopen Settings. Apply the saved configuration at the next startup.
 
-- 给 agent 类命令用 `"$SLASHIE_PROMPT"`，链接跟着进上下文
-- `{args}` 占位符是原文替换进 `sh -c`：内容带引号、`$()`、反引号会破坏命令。凡不可信或含特殊字符的内容，一律走 `SLASHIE_*` 环境变量
-
-## 8. 关键时序
-
-### 8.1 正常触发
-
-```
-飞书                        slashie                          本机
- │ 发送 /ping                │                                │
- │──(下轮扫描搜到)──────────▶│ claim 写 state                  │
- │                          │ 匹配 /ping，入队                 │
- │                          │── /bin/sh -c echo pong ───────▶│
- │                          │◀── stdout: pong ───────────────│
- │◀── 回帖原消息 ────────────│ done 写 state                   │
-```
-
-### 8.2 超时
-
-```
-飞书                        slashie                          本机
- │ 发送 /doubao …            │                                │
- │──(搜到)─────────────────▶│ claim → 队列 → 启动进程组         │
- │                          │  timeout 到点：                  │
- │                          │  SIGTERM 进程组 → 2s → SIGKILL   │
- │◀── 回帖已有 stdout + 超时说明│ failed 写 state                 │
-```
-
-### 8.3 崩溃恢复（不双帖）
-
-```
-飞书                        slashie
- │ 发送 /ping                │ claim 已落盘                    │
- │──(搜到)─────────────────▶│ ✗ 进程被杀，收尾未发生            │
- │ 重启 slashie              │ 发现 claimed 遗留                │
- │                          │ 视为已处理，记 warning            │
- │                          │ 不重放、不双帖                    │
-```
-
-### 8.4 自触发拦截
-
-```
-slashie 回帖「/ping 开头的内容」
- │ own_replies 记录该回帖 ID   │
- │──(下轮搜到这条回帖)────────▶│ root_id 非空 → 跳过             │
- │                          │ 即使误判，排除名单/保险丝兜底       │
-```
-
-## 9. 运行与文件
-
-| 路径 | 作用 |
-|---|---|
-| `~/.slashie/config.json` | 配置，首次启动自动生成并回填身份 |
-| `~/.slashie/state.json` | 扫描游标 + 已处理消息 + 自身回帖名单 |
-| `~/.slashie/slashie.log` | 运行日志，秒级时间戳，超过 2MB 截半 |
-| `~/.slashie/app.pid` | 单实例锁，固定真实家目录，与配置目录无关 |
-
-- Mac：双击 `slashie.app`（菜单栏 `/` 图标），或 `slashie --headless` 无界面常驻、日志同步到终端
-- Linux：`cargo build --release --no-default-features`，配 systemd 单元（`Restart=on-failure`），逻辑与 Mac 完全一致
-
-## 10. 已知限制与规避
-
-| 限制 | 影响 | 规避 |
-|---|---|---|
-| 从临时会话启动继承短期身份 | 十几分钟后报 `temporary token expired`，整轮失效 | 用菜单栏版独立启动，凭据长期有效 |
-| 搜索索引延迟 | 发消息后数秒才可搜到 | 游标回看窗口天然覆盖 |
-| 只扫本人发出的消息 | 别人发的不触发 | 设计如此，避免变成公共机器人 |
-| 去重不跨机 | 两台机器同时开各回一次 | 按路由归属分工（每台只认自己的前缀），不做中心存储 |
-| 依赖 lark-cli 权限 | 换机器可能缺 `im:message.send_as_user` | 补权限或换带权限的凭据 |
-| 触发范围 = 所有会话 | 手滑在错群执行并公开回帖 | 可选 `chats` 白名单（US-10） |
-| query 走搜索分词 | 特殊字符前缀命中率不保证 | 每个前缀实测一遍；漏命中是坑，误命中无害（有客户端校验） |
-
-## 11. 演进方向（不实现，仅记录）
-
-- **p2p 机器人路线**：最小自建应用 + 与自己单聊，`receive_v1` 对你发的每条消息实时推送——免轮询、免搜索索引延迟、触发范围天然收敛在私聊，重推幂等用 message_id。代价回到建应用与审批。限流或延迟真成问题时启用。
-- **post 类型回帖**：带代码块，agent 输出可读性更好。
-- **多机分工**：`routes[].owner` 按机器名过滤，两台机器各认各的路由。
-- **路由扩展**：`/codex`、`/claude` 只是再加一条配置，不改代码。
-
-## 12. 不做的事
-
-- 不做别人消息的触发——不成公共机器人
-- 不做中心化服务、不做跨机状态同步
-- 不做交互卡片与多轮回贴——一条消息一次触发一次回帖
-- 不做飞书之外的渠道
-- 不做占位符安全化——不可信内容一律走环境变量
+Keep the runtime directory and files accessible only to the local user. Credentials remain in Lark CLI's credential store.

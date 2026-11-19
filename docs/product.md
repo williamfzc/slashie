@@ -1,94 +1,52 @@
-# slashie 产品文档
+---
+type: specification
+title: Slashie product specification
+description: Feishu-to-local workflow, release scope, and acceptance criteria.
+---
 
-一句话：在飞书里发 `/前缀 内容`，本机执行对应命令，结果回帖到原消息。
+# Slashie product specification
 
-## 一、要解决的问题
+Send a slash command in Feishu. Slashie finds the message under an existing authorized Lark CLI user identity, runs a configured command on the user's machine, and replies to the original message. The intended setup is one account and one host.
 
-| 现状 | 带来的问题 |
-|---|---|
-| 平时在飞书里干活 | 想让本机 agent（豆包、codex、claude code）接着干，但不想切窗口、复制粘贴 |
-| 飞书没有「本人发消息」的推送事件 | 自建机器人只收别人 @ 它的消息，拿不到本人发出的内容 |
+## Trigger and reply
 
-slashie 的答案：本人身份轮询搜索 + 前缀路由 + 原消息回帖。不建机器人、不加群、不用别人授权，一个账号、任何会话都能用。飞书不给你本人消息的 callback，slashie 就是自己造的那个 callback。
+1. The operator configures a route and enables polling. A new installation starts paused with a fixed `/ping` route that replies `pong`.
+2. The first whitespace-delimited token of a self-authored, searchable, top-level text message must match a configured prefix exactly. `/pingpong` does not match `/ping`. Multiline arguments keep their internal line breaks.
+3. Direct messages and ordinary groups are release targets. Replies, recalled messages, and non-text messages are ignored. Topic support requires its own evidence of root classification and reply placement.
+4. Routes can pass message arguments as one value, with or without source context. Context includes the message ID and an available message or conversation link.
+5. Slashie attempts one text reply targeting the original message. Success returns stdout, with a short acknowledgment for empty output. Failure or timeout returns the reason and available diagnostics. Long replies include a truncation notice. Slashie discards output beyond the excerpt.
 
-## 二、目标与非目标
+Enabling polling covers supported conversations visible to the authorized account. A group can see the reply. Route commands run with the local user's permissions. An agent may send request data to its provider according to its own configuration.
 
-目标：
+## Controls and faults
 
-- 从发消息到回帖，延迟 = 轮询拾取（≤ interval）+ 命令耗时，稳定可预期
-- 任何会话可用：私聊、群聊、话题，回帖永远落在原消息下
-- 输出可信：成功只回标准输出，失败明确给原因；单条消息只执行一次
+Use the [macOS menu](menu-bar.md) to toggle polling, open Settings, and quit. Settings edits the polling interval and route commands. Saved edits take effect after restart, and the diagnostic log is available from Settings. Headless mode runs the same service in the foreground and logs status. Feishu carries command outcomes. The menu and the local log carry operational faults, including when a reply failed or its delivery is uncertain.
 
-非目标（不做的事）：
+## Pause and recovery
 
-- 不做公共机器人——只响应本人消息，避免变成多人工具
-- 不做中心服务、不做跨机去重——单机自治，两台机器用分工解决
-- 不做交互卡片与多轮回贴——一条消息一次触发一次回帖
-- 不做多平台 IM——飞书优先
+Each start or resume begins with messages sent after that point. Pausing stops new admissions and lets accepted work finish. The polling setting survives a restart. A running process searches a bounded recent window to absorb indexing delays and short interruptions. Requests sent before startup, while paused, or outside that window require a fresh message.
 
-## 三、用户与核心场景
+A claimed message gets at most one execution attempt on the same host while its state is intact. A crash can leave the command or reply outcome uncertain. Check Feishu and the log before sending a fresh request, which can repeat local side effects.
 
-用户是一个人（作者本人），一台主力 Mac，飞书是主要工作界面。
+## Delivery and evidence
 
-| 场景 | 输入 | 发生什么 |
-|---|---|---|
-| 唤起 agent | `/doubao 帮我写个 xx 脚本` | 豆包 CLI 收到内容 + 消息链接（来源跟着进上下文），结果回帖 |
-| 快速验证 | `/ping` | 本机 `echo pong`，回帖 pong，链路活着 |
-| 任意扩展 | `/codex …` | 配置里加一条路由即可，不改代码 |
+| Milestone | Scope and evidence |
+| --- | --- |
+| macOS prototype | Commit `a23ce0a` records the Feishu-to-command loop and a single-command `/doubao` observation of 6.8–8.8 seconds under the former name `fsq`. |
+| v1.1 | macOS native menu and foreground headless mode over the shared runtime. Acceptance is pending implementation. |
+| v1.2 | Linux headless build and systemd user service. Acceptance is pending Linux validation. |
 
-多行内容和消息链接都能进上下文；链接必须进命令参数（agent 才能引用来源），不能只躺在环境变量里。
+This checkout contains specifications. An isolated Cargo probe verified the optional desktop build and macOS bundle layout. It exercised neither the Slashie runtime nor the Feishu workflow. If search cannot reliably discover requests in the release-target conversations, revisit the trigger mechanism before release.
 
-## 四、产品形态
+## Release acceptance
 
-| 形态 | 入口 | 平台 |
-|---|---|---|
-| 菜单栏 app | slashie.app，菜单栏 `/` 图标 | macOS |
-| 无界面常驻 | `slashie --headless`，日志同步到终端 | macOS / Linux |
-
-菜单栏内容：状态文案（含退避/熔断提示）、轮询开关、间隔（10/20/30/60 秒）、打开配置、打开日志、退出。
-
-通知范围（已决策）：只有基础设施故障才发系统通知——回帖失败、token 失效、限流熔断、单实例冲突。命令失败不发通知：失败回帖本身在飞书里可见。
-
-## 五、功能清单
-
-| ID | 用户故事 | 优先级 | 验收边界 | 状态 |
-|---|---|---|---|---|
-| US-01 | 我在任意会话发 `/前缀 内容`，本机执行并回帖 | P0 | 触发 → 回帖 = 间隔内拾取 + 命令耗时；结果落在原消息下 | 已跑通 |
-| US-02 | 多行内容与消息链接进上下文 | P0 | `$SLASHIE_PROMPT` 含内容 + 空行 + 来源说明；链接进参数 | 已跑通 |
-| US-03 | 单条消息只执行一次，重启不重放 | P0 | 先占位后执行；崩溃后最多丢触发，绝不双帖 | 基础已有，本期加固 |
-| US-04 | 工具不被自己触发 | P0 | 只触发非回复消息；自身回帖进排除名单；频率保险丝兜底 | 本期 |
-| US-05 | 超时把进程杀干净 | P0 | timeout 到点，命令及其全部子进程终止；已有输出回帖 | 本期 |
-| US-06 | 长输出不静默丢失 | P1 | 超上限截断，并提示完整输出位置 | 本期 |
-| US-07 | 故障可见 | P1 | 限流 / token 失效 / 回帖失败 → 菜单栏状态 + 系统通知 | 本期 |
-| US-08 | 合盖睡眠、停机后不漏消息 | P1 | 游标式回看窗口，恢复后从上次进度接着扫 | 本期 |
-| US-09 | 出错不硬轮 | P1 | 连续失败指数退避，恢复后回正常节奏 | 本期 |
-| US-10 | 限定触发会话 | P2 | 可选白名单，白名单外的会话不触发不回帖 | Later |
-| US-11 | 开机自启、配置热更新 | P2 | 登录项；间隔与开关即时生效 | 已具备 |
-
-## 六、验证口径
-
-| 口径 | 标准做法 | 通过标准 |
-|---|---|---|
-| 延迟 | 测试群发 `/ping` | 端到端 ≤ interval + 2s |
-| 幂等 | 处理中途 `kill -9` 后重启 | 最近窗口内消息不重放、不双帖 |
-| 干净终止 | 配置短 timeout 触发超时 | `ps` 里无孤儿进程 |
-| 自触发 | 构造以 `/ping` 开头的回帖内容 | 下一轮扫描不触发 |
-
-## 七、路线图
-
-| 版本 | 内容 | 状态 |
-|---|---|---|
-| 原型 | 轮询 / 路由 / 执行 / 回帖闭环，Mac 菜单栏 | 已跑通（原型期旧名 fsq） |
-| v1.1 加固 | claim-first 去重、自触发防护、进程组杀、独立暂存、执行队列、截断、退避、通知 | 本期 |
-| v1.2 | Linux systemd 交付、游标回看 | Next |
-| Later | 会话白名单、post 类型回帖（代码块）、多机分工字段 | 记录，不承诺 |
-
-## 八、决策记录
-
-| 决策 | 结论 | 依据 |
-|---|---|---|
-| 触发机制 | 本人身份轮询搜索 | 飞书无本人消息事件；receive_v1 机器人路线是备选（design §11） |
-| 命名 | 定名 slashie（备选 slashback；原型期旧名 fsq 已弃） | slashie 空闲、斜杠族双关；fsq 撞名且无含义 |
-| 通知范围 | 仅基础设施故障 | 命令失败在飞书里已可见，重复通知是噪音 |
-| 多机去重 | 不做中心存储；按路由归属分工 | 中心存储对单人工具是过度设计，分工简单一个数量级 |
-| 去重顺序 | 先占位后执行 | 偶发丢一条可自然重发；偶发双帖不可接受 |
+| Case | Pass condition |
+| --- | --- |
+| Send `/ping` in a direct message and ordinary group. | One reply references the original message in each released surface. |
+| Exercise both route input forms with multiline text and shell metacharacters. Send a near-prefix, another author's message, and a reply beginning with a command. | The selected input form arrives as one argument. Source context is included when requested. Message text cannot change the shell program, and ineligible messages never execute. |
+| Deliver duplicate and late-indexed results. Kill the process after a claim and during a reply attempt. | Eligible results inside the window run once. Claims survive restart and uncertain attempts appear in the log. Corrupt state blocks new work. |
+| Pause during a command, send messages while paused, resume, and restart. | Accepted work can finish during pause. Earlier messages remain outside every new activation window. |
+| Submit work while a command runs, then time out a command that has ordinary child processes. | Execution stays serial, polling proceeds while queue space remains, and the timed-out process group exits. |
+| Exercise empty stdout, long output, invalid configuration, expired credentials, and an ambiguous reply. | Replies and local fault states follow the contracts above. The reply marks truncated output. Ambiguous delivery does not trigger a resend. |
+| Measure repeated `/ping` round trips with an empty queue and healthy Feishu access. | Target the [polling interval](DESIGN.md#polling-and-claims) plus two seconds. Record sample count, median, maximum, and outliers due to indexing or delivery. |
+| Launch each macOS mode, then validate the Linux service in v1.2. | Pass the [menu](menu-bar.md#acceptance) and [build and launch](DESIGN.md#desktop-build) checks. |

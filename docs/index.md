@@ -1,6 +1,11 @@
-# slashie 文档索引
+---
+type: index
+title: Slashie documentation
+description: Entry point for the Slashie product, interaction, and engineering specifications.
+---
 
-| 文档 | 说明 |
-|---|---|
-| [product.md](product.md) | 产品文档：问题、目标、场景、功能清单、验证口径、路线图、决策记录 |
-| [design.md](design.md) | 技术设计：架构、平台依赖、核心链路、关键机制、配置模型、时序、限制 |
+# Slashie documentation
+
+- [Product](product.md) defines the workflow, scope, and acceptance.
+- [Menu bar and Settings](menu-bar.md) defines the macOS controls, configuration window, and status text.
+- [Technical design](DESIGN.md) defines the runtime, Feishu integration, and configuration.
