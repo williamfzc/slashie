@@ -1,15 +1,27 @@
-//! `slashie` entry point. This slice ships headless mode over the shared
-//! runtime with a mock Feishu transport; the macOS tray and Settings surface
-//! land after the slice passes review (DESIGN.md "Desktop build").
+//! `slashie` entry point. The macOS bundle starts in menu-bar mode (tray
+//! feature); `--headless` selects foreground mode, and a headless build
+//! (no default features) is foreground-only (DESIGN.md "Launch and
+//! shutdown", "Desktop build").
 
 mod config;
 mod lark;
 mod lock;
 mod logging;
 mod runtime;
+// Settings draft handling is exercised by the Settings window (tray build);
+// the headless artifact compiles it so both builds share one validator.
+#[allow(dead_code)]
+mod settings;
 mod state;
+// The status copy table is consumed by the menu bar (tray build); the
+// headless artifact compiles it so both builds share one copy mapping.
+#[allow(dead_code)]
+mod status;
 mod transport;
 mod worker;
+
+#[cfg(feature = "tray")]
+mod app;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -35,12 +47,12 @@ fn print_help() {
              slashie [OPTIONS]\n\
          \n\
          OPTIONS:\n\
-             --headless        Run the shared runtime in the foreground (the only\n\
-                               mode in this slice; the macOS tray comes later).\n\
+             --headless        Run the shared runtime in the foreground even in\n\
+                               the macOS bundle (default for headless builds).\n\
              --poll <on|off>   Update the persisted polling setting under the\n\
                                lock, then exit.\n\
              --mock <FILE>     Use the mock Feishu transport backed by a JSON\n\
-                               fixture instead of the Lark CLI (slice scope).\n\
+                               fixture instead of the Lark CLI (verification).\n\
              --help            Print this help.\n\
              --version         Print the version.",
         VERSION
@@ -50,6 +62,23 @@ fn print_help() {
 fn fail(msg: &str) -> ! {
     eprintln!("slashie: {}", msg);
     std::process::exit(2);
+}
+
+/// Native alert for a Finder-launched second instance (menu-bar.md).
+#[cfg(feature = "tray")]
+fn alert_and_exit(msg: &str) -> ! {
+    use rfd::MessageDialog;
+    MessageDialog::new()
+        .set_title("Slashie")
+        .set_description(msg)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+    std::process::exit(2);
+}
+
+#[cfg(not(feature = "tray"))]
+fn alert_and_exit(msg: &str) -> ! {
+    fail(msg)
 }
 
 fn runtime_home() -> PathBuf {
@@ -94,22 +123,31 @@ fn main() {
             other => fail(&format!("unknown argument {:?}; try --help", other)),
         }
     }
-    // Headless is the default for this slice build; the flag is accepted so
-    // the documented launch line already works.
-    let _ = headless;
+    // The macOS bundle starts in menu-bar mode; --headless forces foreground.
+    // A headless build is foreground-only.
+    #[cfg(not(feature = "tray"))]
+    let menu_bar_mode = {
+        let _ = headless;
+        false
+    };
+    #[cfg(feature = "tray")]
+    let menu_bar_mode = !headless && std::env::var("SLASHIE_HEADLESS").is_err();
 
     let home = runtime_home();
     std::fs::create_dir_all(&home).unwrap_or_else(|e| fail(&format!("cannot create {}: {}", home.display(), e)));
 
-    // Exclusive instance lock, held until shutdown; conflict reports and exits.
-    let _guard = match lock::acquire(&home) {
+    // Exclusive instance lock, held until shutdown; a Finder-launched second
+    // instance shows the native alert and exits.
+    let guard = match lock::acquire(&home) {
         lock::LockResult::Acquired(g) => g,
-        lock::LockResult::Conflict => fail(&format!(
-            "Slashie is already running (lock held at {}).",
+        lock::LockResult::Conflict => alert_and_exit(&format!(
+            "Slashie is already running. (lock held at {})",
             home.join("app.lock").display()
         )),
         lock::LockResult::Failed(m) => fail(&m),
     };
+    // The AppLock is held for the process lifetime; nothing reads the file.
+    std::mem::forget(guard);
 
     let shutdown = Arc::new(AtomicBool::new(false));
     SHUTDOWN_PTR.store(Arc::as_ptr(&shutdown) as usize, Ordering::SeqCst);
@@ -164,20 +202,22 @@ fn main() {
         }
     };
 
-    let logger = Arc::new(logging::Logger::new(&home, true));
-    let rt = runtime::Runtime::init(
-        home,
-        runtime::LoadedConfig {
-            config,
-            fault: config_fault,
-        },
-        transport,
-        identity,
-        shutdown.clone(),
-        logger.clone(),
-        poll,
-    )
-    .unwrap_or_else(|e| fail(&e));
+    let logger = Arc::new(logging::Logger::new(&home, !menu_bar_mode));
+    let rt = Arc::new(
+        runtime::Runtime::init(
+            home,
+            runtime::LoadedConfig {
+                config,
+                fault: config_fault,
+            },
+            transport,
+            identity,
+            shutdown.clone(),
+            logger.clone(),
+            poll,
+        )
+        .unwrap_or_else(|e| fail(&e)),
+    );
 
     if let Some(reason) = rt.intake_blocked.lock().unwrap().clone() {
         logger.log(&format!("ERROR intake blocked: {}", reason));
@@ -194,6 +234,18 @@ fn main() {
         return;
     }
 
-    logger.log("slashie starting (headless, mock transport)");
-    rt.run();
+    logger.log(if menu_bar_mode {
+        "slashie starting (menu bar)"
+    } else {
+        "slashie starting (headless)"
+    });
+
+    if menu_bar_mode {
+        #[cfg(feature = "tray")]
+        {
+            app::run(rt, shutdown);
+        }
+    } else {
+        rt.run();
+    }
 }

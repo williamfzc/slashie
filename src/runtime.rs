@@ -33,6 +33,8 @@ pub struct Runtime {
     pub resume_boundary_ms: Mutex<i64>,
     /// Set when a fault requires operator action; blocks all intake.
     pub intake_blocked: Mutex<Option<String>>,
+    /// Shared status snapshot reflected in the menu bar.
+    pub status: Arc<Mutex<crate::status::RuntimeStatus>>,
     job_tx: mpsc::Sender<Option<Job>>,
     job_rx: Mutex<Option<mpsc::Receiver<Option<Job>>>>,
 }
@@ -92,6 +94,11 @@ impl Runtime {
 
         let blocked = config_fault.or(state_fault);
 
+        let status = Arc::new(Mutex::new(crate::status::RuntimeStatus {
+            phase: Some(crate::status::Phase::Starting),
+            ..Default::default()
+        }));
+
         let (job_tx, job_rx) = mpsc::channel::<Option<Job>>();
 
         let runtime = Runtime {
@@ -104,6 +111,7 @@ impl Runtime {
             shutdown,
             resume_boundary_ms: Mutex::new(now_ms()),
             intake_blocked: Mutex::new(blocked),
+            status,
             job_tx,
             job_rx: Mutex::new(Some(job_rx)),
         };
@@ -111,8 +119,14 @@ impl Runtime {
         runtime.bind_identity();
         runtime.settle_pending_as_interrupted();
         if let Some(on) = poll_override {
-            runtime.apply_poll_setting(on);
+            let _ = runtime.apply_poll_setting(on);
         }
+        runtime.refresh_status();
+        runtime
+            .status
+            .lock()
+            .unwrap()
+            .phase = None;
         Ok(runtime)
     }
 
@@ -139,6 +153,8 @@ impl Runtime {
                 );
                 self.logger.log(&format!("ERROR {}", msg));
                 *self.intake_blocked.lock().unwrap() = Some(msg);
+                self.status.lock().unwrap().operator_action =
+                    Some(crate::status::OperatorFault::SignInToFeishu);
             }
         }
     }
@@ -168,22 +184,42 @@ impl Runtime {
     }
 
     /// Update the persisted polling setting under the state lock (shared by
-    /// the menu toggle, headless `--poll on|off`, and restarts).
-    pub fn apply_poll_setting(&self, on: bool) {
-        let mut st = self.state.lock().unwrap();
-        if st.polling != on {
-            st.polling = on;
-            if let Err(e) = save(&self.home, &st) {
+    /// the menu toggle, headless `--poll on|off`, and restarts). Returns
+    /// Err when the write failed so the menu can restore its checkmark.
+    pub fn apply_poll_setting(&self, on: bool) -> Result<(), ()> {
+        {
+            let mut st = self.state.lock().unwrap();
+            if st.polling != on {
+                st.polling = on;
+                if let Err(e) = save(&self.home, &st) {
+                    self.logger
+                        .log(&format!("ERROR cannot save polling setting: {}", e));
+                    self.status.lock().unwrap().operator_action =
+                        Some(crate::status::OperatorFault::CouldNotSavePollingSetting);
+                    return Err(());
+                }
                 self.logger
-                    .log(&format!("ERROR cannot save polling setting: {}", e));
-                return;
+                    .log(&format!("polling set to {}", if on { "on" } else { "off" }));
             }
-            self.logger
-                .log(&format!("polling set to {}", if on { "on" } else { "off" }));
+            if on {
+                // Resume sets a new time boundary.
+                *self.resume_boundary_ms.lock().unwrap() = now_ms();
+            }
         }
-        if on {
-            // Resume sets a new time boundary.
-            *self.resume_boundary_ms.lock().unwrap() = now_ms();
+        self.refresh_status();
+        Ok(())
+    }
+
+    /// Recompute the derived status fields from current state.
+    pub fn refresh_status(&self) {
+        let mut status = self.status.lock().unwrap();
+        status.finishing_accepted = {
+            let st = self.state.lock().unwrap();
+            !st.polling && st.waiting_count() > 0
+        };
+        if status.finishing_accepted {
+            // Accepted work finishing is more specific than a stale retry.
+            status.retrying = None;
         }
     }
 
@@ -217,6 +253,12 @@ impl Runtime {
             Err(TransportError::Transient(m)) => {
                 // Slice note: full exponential backoff comes with the real adapter.
                 self.logger.log(&format!("scan transient failure: {}", m));
+                let kind = if m.to_lowercase().contains("rate") {
+                    crate::status::RetryKind::RateLimited
+                } else {
+                    crate::status::RetryKind::FeishuUnavailable
+                };
+                self.status.lock().unwrap().retrying = Some(kind);
                 return Err(error(format!("transient scan failure: {}", m)));
             }
             Err(TransportError::Fatal(m)) => {
@@ -318,6 +360,7 @@ impl Runtime {
         // Complete scan: advance the pruning cutoff and prune settled claims
         // that have left the scan horizon.
         {
+            self.status.lock().unwrap().retrying = None;
             let mut st = self.state.lock().unwrap();
             st.advance_cutoff(end);
             let horizon = end - LOOKBACK_MS;
@@ -360,11 +403,16 @@ impl Runtime {
                     "reply sent to {} (reply {})",
                     job.message.id, reply_id
                 ));
+                // A confirmed later reply clears the reply status.
+                let mut status = self.status.lock().unwrap();
+                status.reply_failed = false;
+                status.reply_unconfirmed = false;
                 "reply_sent".to_string()
             }
             Err(crate::transport::ReplyError::Rejected(m)) => {
                 self.logger
                     .log(&format!("reply rejected for {}: {}", job.message.id, m));
+                self.status.lock().unwrap().reply_failed = true;
                 "reply_rejected".to_string()
             }
             Err(crate::transport::ReplyError::Uncertain(m)) => {
@@ -372,6 +420,9 @@ impl Runtime {
                     "reply delivery uncertain for {}: {} (no resend)",
                     job.message.id, m
                 ));
+                let mut status = self.status.lock().unwrap();
+                status.reply_unconfirmed = true;
+                status.reply_failed = false;
                 "reply_uncertain".to_string()
             }
         };
@@ -422,6 +473,7 @@ impl Runtime {
 
             // Shared shutdown: stop intake, drain accepted work; the active
             // command group terminates via the shutdown flag in run_command.
+            self.status.lock().unwrap().phase = Some(crate::status::Phase::Quitting);
             self.logger.log("shutdown: draining accepted work");
             let _ = tx.send(None);
             drop(tx);
@@ -669,7 +721,7 @@ mod tests {
         let (rt, mock, home) = init_rt("pause", fixture_with(msgs), boundary);
         assert_eq!(rt.scan_once().unwrap(), 2);
         // Pause: stops new admissions.
-        rt.apply_poll_setting(false);
+        let _ = rt.apply_poll_setting(false);
         assert_eq!(rt.scan_once().unwrap(), 0);
         // Accepted work can still finish: process all pending jobs directly.
         let st = rt.state.lock().unwrap();
@@ -690,7 +742,7 @@ mod tests {
         // Resume admits only messages after the new resume boundary: both
         // fixture messages are older, so nothing new is admitted.
         let now2 = now_ms();
-        rt.apply_poll_setting(true);
+        let _ = rt.apply_poll_setting(true);
         *rt.resume_boundary_ms.lock().unwrap() = now2;
         assert_eq!(rt.scan_once().unwrap(), 0);
         let _ = std::fs::remove_dir_all(&home);

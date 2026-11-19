@@ -1,0 +1,148 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Slashie Settings</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 13px -apple-system, sans-serif; margin: 16px; }
+    h2 { font-size: 13px; margin: 12px 0 6px; }
+    .row { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
+    .row input { flex: 1; }
+    .invalid { border-color: #d0342c; outline: 1px solid #d0342c; }
+    .err { color: #d0342c; font-size: 11px; }
+    .footer { display: flex; justify-content: space-between; margin-top: 14px; }
+    .forms { color: gray; font-size: 11px; margin: 6px 0 0; }
+    #message { margin-left: 8px; color: #2a7d2a; }
+    .config-error { color: #d0342c; margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+  <div id="config-error" class="config-error" hidden></div>
+  <h2>Polling Interval</h2>
+  <select id="interval">
+    <option value="10">10 seconds</option>
+    <option value="20">20 seconds</option>
+    <option value="30">30 seconds</option>
+    <option value="60">60 seconds</option>
+  </select>
+
+  <h2>Routes</h2>
+  <div id="routes"></div>
+  <button id="add-route">Add Route</button>
+  <p class="forms">
+    "$SLASHIE_ARGS" passes the text after the slash command; "$SLASHIE_PROMPT"
+    passes that text plus the message source, e.g. <code>codex exec "$SLASHIE_PROMPT"</code>.
+    A fixed command such as <code>echo pong</code> needs no input.
+  </p>
+
+  <div class="footer">
+    <button id="open-log">Open Log</button>
+    <span><span id="message"></span><button id="save">Save</button></span>
+  </div>
+
+  <script>
+    const { invoke } = window.__TAURI__;
+    let snapshot = "";
+    let configPath = "";
+    let configUnparsable = false;
+
+    function routeRow(prefix, cmd) {
+      const row = document.createElement("div");
+      row.className = "row";
+      const p = document.createElement("input");
+      p.placeholder = "/prefix";
+      p.value = prefix;
+      const c = document.createElement("input");
+      c.placeholder = "Command";
+      c.value = cmd;
+      const rm = document.createElement("button");
+      rm.textContent = "Remove";
+      rm.onclick = () => row.remove();
+      row.append(p, c, rm);
+      return row;
+    }
+
+    function collectDraft() {
+      return {
+        pollInterval: parseInt(document.getElementById("interval").value, 10),
+        routes: [...document.querySelectorAll("#routes .row")].map((row) => ({
+          prefix: row.children[0].value.trim(),
+          cmd: row.children[1].value,
+        })),
+      };
+    }
+
+    function markErrors(errors) {
+      document.querySelectorAll("#routes .row").forEach((row, i) => {
+        row.children[0].classList.remove("invalid");
+        row.children[1].classList.remove("invalid");
+      });
+      document.getElementById("interval").classList.remove("invalid");
+      let first = null;
+      for (const e of errors) {
+        let el = null;
+        if (e.field === "poll_interval") el = document.getElementById("interval");
+        else if (e.row !== null) el = document.querySelectorAll("#routes .row")[e.row]?.children[e.field === "cmd" ? 1 : 0];
+        if (el) {
+          el.classList.add("invalid");
+          el.title = e.message;
+          first = first || el;
+        }
+      }
+      return first;
+    }
+
+    async function load() {
+      const s = await invoke("get_settings");
+      snapshot = s.snapshot;
+      configPath = s.config_path;
+      configUnparsable = s.config_unparsable;
+      document.getElementById("interval").value = String(s.draft.pollInterval ?? s.draft.poll_interval);
+      const routes = s.draft.routes;
+      const box = document.getElementById("routes");
+      box.innerHTML = "";
+      for (const r of routes) box.appendChild(routeRow(r.prefix, r.cmd));
+      document.getElementById("open-log").disabled = !s.log_available;
+      const errBox = document.getElementById("config-error");
+      if (configUnparsable) {
+        errBox.hidden = false;
+        errBox.textContent = "config.json cannot be parsed: " + configPath + ". Repair the file, then reopen Settings.";
+        document.getElementById("save").disabled = true;
+      }
+    }
+
+    document.getElementById("add-route").onclick = () =>
+      document.getElementById("routes").appendChild(routeRow("", ""));
+
+    document.getElementById("open-log").onclick = () => invoke("open_log").catch(alert);
+
+    document.getElementById("save").onclick = async () => {
+      const msg = document.getElementById("message");
+      msg.textContent = "";
+      const draft = collectDraft();
+      const result = await invoke("save_settings_cmd", { snapshot, draft });
+      if (result === "Saved") {
+        msg.textContent = "Saved. Restart Slashie to apply.";
+        snapshot = await invoke("get_settings").then((s) => s.snapshot);
+        return;
+      }
+      if (result === "FileChanged") {
+        alert("The configuration file changed since Settings opened. Reopen Settings and try again.");
+        return;
+      }
+      if (result && result.Invalid) {
+        markErrors(result.Invalid);
+        return;
+      }
+      if (result && result.Unparsable) {
+        alert("config.json cannot be parsed: " + result.Unparsable);
+        return;
+      }
+      if (result && result.Io) alert(result.Io);
+    };
+
+    load();
+  </script>
+</body>
+</html>
