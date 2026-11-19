@@ -1,0 +1,285 @@
+//! Feishu transport abstraction. The real Lark CLI adapter is follow-up scope;
+//! this slice uses a mock transport driven by an injectable fixture, so the
+//! runtime logic can be verified without any live Feishu access (see the
+//! approved acceptance slice).
+
+use serde::{Deserialize, Serialize};
+
+/// Message details as the runtime sees them after `mget`-style retrieval.
+/// Timestamps are injectable fixture data (millis since the epoch) per the
+/// slice's documented ambiguity note.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Message {
+    pub id: String,
+    /// Sender open_id.
+    pub sender: String,
+    pub created_at_ms: i64,
+    /// "p2p" or "group" (mock-shaped; the real adapter decodes placement).
+    pub chat_type: String,
+    /// Decoded text body for text messages; None for non-text messages.
+    pub text: Option<String>,
+    /// Validated placement: true when the message is top-level (no root/parent).
+    pub top_level: bool,
+    pub recalled: bool,
+    /// Verified message link if available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum TransportError {
+    /// Transient; the scan retries with backoff.
+    Transient(String),
+    /// Operator action required (auth, local state).
+    #[allow(dead_code)] // the real Lark CLI adapter classifies auth faults as Fatal
+    Fatal(String),
+    /// An incomplete result or missing page: block admission from this scan.
+    Incomplete(String),
+}
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransportError::Transient(m) => write!(f, "transient transport failure: {}", m),
+            TransportError::Fatal(m) => write!(f, "fatal transport failure: {}", m),
+            TransportError::Incomplete(m) => write!(f, "incomplete search result: {}", m),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ReplyError {
+    /// Definitive rejection by the API.
+    Rejected(String),
+    /// Feishu may have accepted it; delivery is uncertain, never resend.
+    Uncertain(String),
+}
+
+impl std::fmt::Display for ReplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReplyError::Rejected(m) => write!(f, "reply rejected: {}", m),
+            ReplyError::Uncertain(m) => write!(f, "reply delivery uncertain: {}", m),
+        }
+    }
+}
+
+pub trait Transport: Send + Sync {
+    /// Search message IDs in [from_ms, to_ms]. Returns IDs only, in the order
+    /// the backend provides; ordering and dedup happen in the runtime.
+    fn search(&self, from_ms: i64, to_ms: i64) -> Result<Vec<String>, TransportError>;
+
+    /// Fetch details for the given IDs. Missing IDs mean an incomplete result.
+    fn mget(&self, ids: &[String]) -> Result<Vec<Message>, TransportError>;
+
+    /// One reply attempt targeting the source message. Returns the reply ID
+    /// on confirmed success.
+    fn reply(&self, source_id: &str, text: &str) -> Result<String, ReplyError>;
+}
+
+/// Records of replies made by the mock, for test assertions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplyRecord {
+    pub source_id: String,
+    pub text: String,
+    pub reply_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MockFixture {
+    pub self_open_id: String,
+    pub messages: Vec<Message>,
+    /// Mock behavior switches.
+    #[serde(default)]
+    pub behavior: MockBehavior,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MockBehavior {
+    /// Make search return a transient error this many times before succeeding.
+    #[serde(default)]
+    pub transient_search_failures: u32,
+    /// Make mget drop these IDs (incomplete result -> scan blocked).
+    #[serde(default)]
+    pub mget_missing_ids: Vec<String>,
+    /// Make every reply fail definitively.
+    #[serde(default)]
+    pub reply_rejected: bool,
+    /// Make every reply report uncertain delivery.
+    #[serde(default)]
+    pub reply_uncertain: bool,
+}
+
+pub struct MockTransport {
+    fixture: MockFixture,
+    search_failures_left: std::sync::atomic::AtomicU32,
+    pub replies: std::sync::Mutex<Vec<ReplyRecord>>,
+    next_reply_id: std::sync::atomic::AtomicU32,
+}
+
+impl MockTransport {
+    pub fn new(fixture: MockFixture) -> MockTransport {
+        let left = fixture.behavior.transient_search_failures;
+        MockTransport {
+            fixture,
+            search_failures_left: std::sync::atomic::AtomicU32::new(left),
+            replies: std::sync::Mutex::new(Vec::new()),
+            next_reply_id: std::sync::atomic::AtomicU32::new(1),
+        }
+    }
+
+    pub fn from_json(text: &str) -> Result<MockTransport, String> {
+        let fixture: MockFixture =
+            serde_json::from_str(text).map_err(|e| format!("invalid mock fixture: {}", e))?;
+        Ok(MockTransport::new(fixture))
+    }
+
+    pub fn self_open_id(&self) -> &str {
+        &self.fixture.self_open_id
+    }
+
+    #[allow(dead_code)] // used by tests in the same module and by future hosts
+    pub fn reply_records(&self) -> Vec<ReplyRecord> {
+        self.replies.lock().unwrap().clone()
+    }
+}
+
+impl Transport for MockTransport {
+    fn search(&self, from_ms: i64, to_ms: i64) -> Result<Vec<String>, TransportError> {
+        let left = self
+            .search_failures_left
+            .try_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |n| {
+                if n > 0 {
+                    Some(n - 1)
+                } else {
+                    None
+                }
+            });
+        if left.is_ok() {
+            return Err(TransportError::Transient("mock transient search failure".into()));
+        }
+        Ok(self
+            .fixture
+            .messages
+            .iter()
+            .filter(|m| m.created_at_ms >= from_ms && m.created_at_ms <= to_ms)
+            .map(|m| m.id.clone())
+            .collect())
+    }
+
+    fn mget(&self, ids: &[String]) -> Result<Vec<Message>, TransportError> {
+        let missing = &self.fixture.behavior.mget_missing_ids;
+        let mut out = Vec::new();
+        for id in ids {
+            if missing.contains(id) {
+                return Err(TransportError::Incomplete(format!("missing detail for {}", id)));
+            }
+            match self.fixture.messages.iter().find(|m| &m.id == id) {
+                Some(m) => out.push(m.clone()),
+                None => {
+                    return Err(TransportError::Incomplete(format!("unknown id {}", id)));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn reply(&self, source_id: &str, text: &str) -> Result<String, ReplyError> {
+        if self.fixture.behavior.reply_rejected {
+            return Err(ReplyError::Rejected("mock definitive rejection".into()));
+        }
+        if self.fixture.behavior.reply_uncertain {
+            return Err(ReplyError::Uncertain("mock uncertain delivery".into()));
+        }
+        let n = self
+            .next_reply_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let reply_id = format!("om_reply_{}", n);
+        self.replies.lock().unwrap().push(ReplyRecord {
+            source_id: source_id.to_string(),
+            text: text.to_string(),
+            reply_id: reply_id.clone(),
+        });
+        Ok(reply_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(id: &str, ts: i64) -> Message {
+        Message {
+            id: id.into(),
+            sender: "ou_self".into(),
+            created_at_ms: ts,
+            chat_type: "p2p".into(),
+            text: Some("/ping".into()),
+            top_level: true,
+            recalled: false,
+            link: None,
+        }
+    }
+
+    #[test]
+    fn search_filters_by_window() {
+        let t = MockTransport::new(MockFixture {
+            self_open_id: "ou_self".into(),
+            messages: vec![msg("a", 100), msg("b", 200), msg("c", 300)],
+            behavior: Default::default(),
+        });
+        let ids = t.search(150, 250).unwrap();
+        assert_eq!(ids, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn transient_search_failures_then_success() {
+        let t = MockTransport::new(MockFixture {
+            self_open_id: "ou_self".into(),
+            messages: vec![],
+            behavior: MockBehavior {
+                transient_search_failures: 2,
+                ..Default::default()
+            },
+        });
+        assert_eq!(t.search(0, 1), Err(TransportError::Transient("mock transient search failure".into())));
+        assert_eq!(t.search(0, 1), Err(TransportError::Transient("mock transient search failure".into())));
+        assert_eq!(t.search(0, 1), Ok(vec![]));
+    }
+
+    #[test]
+    fn mget_missing_blocks_scan() {
+        let t = MockTransport::new(MockFixture {
+            self_open_id: "ou_self".into(),
+            messages: vec![msg("a", 100)],
+            behavior: MockBehavior {
+                mget_missing_ids: vec!["a".into()],
+                ..Default::default()
+            },
+        });
+        assert!(matches!(
+            t.mget(&["a".to_string()]),
+            Err(TransportError::Incomplete(_))
+        ));
+    }
+
+    #[test]
+    fn reply_modes() {
+        let mut t = MockTransport::new(MockFixture {
+            self_open_id: "ou_self".into(),
+            messages: vec![],
+            behavior: Default::default(),
+        });
+        assert_eq!(t.reply("om_1", "pong").unwrap(), "om_reply_1");
+        assert_eq!(t.reply_records().len(), 1);
+        assert_eq!(t.reply_records()[0].source_id, "om_1");
+
+        t.fixture.behavior.reply_rejected = true;
+        assert!(matches!(t.reply("om_1", "x"), Err(ReplyError::Rejected(_))));
+        t.fixture.behavior.reply_rejected = false;
+        t.fixture.behavior.reply_uncertain = true;
+        assert!(matches!(t.reply("om_1", "x"), Err(ReplyError::Uncertain(_))));
+        // Uncertain attempts are not recorded as sent.
+        assert_eq!(t.reply_records().len(), 1);
+    }
+}

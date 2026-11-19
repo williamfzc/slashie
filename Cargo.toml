@@ -1,0 +1,14 @@
+[package]
+name = "slashie"
+version = "0.1.0"
+edition = "2021"
+description = "Send a slash command in Feishu, run it locally, reply with the outcome."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+
+[[bin]]
+name = "slashie"
+path = "src/main.rs"
