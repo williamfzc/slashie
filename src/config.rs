@@ -177,20 +177,32 @@ mod tests {
 
     #[test]
     fn rejects_bad_poll_interval() {
-        let mut cfg = Config::default();
-        cfg.poll_interval = 15;
+        let cfg = Config {
+            poll_interval: 15,
+            ..Config::default()
+        };
         assert!(validate(&cfg).is_err());
     }
 
     #[test]
     fn rejects_duplicate_prefix() {
-        let mut cfg = Config::default();
-        cfg.routes.push(Route {
-            prefix: "/ping".into(),
-            cmd: "echo again".into(),
-            dir: None,
-            timeout: None,
-        });
+        let cfg = Config {
+            routes: vec![
+                Route {
+                    prefix: "/ping".into(),
+                    cmd: "echo pong".into(),
+                    dir: None,
+                    timeout: None,
+                },
+                Route {
+                    prefix: "/ping".into(),
+                    cmd: "echo again".into(),
+                    dir: None,
+                    timeout: None,
+                },
+            ],
+            ..Config::default()
+        };
         assert_eq!(
             validate(&cfg),
             Err(ConfigError("duplicate route prefix \"/ping\"".into()))

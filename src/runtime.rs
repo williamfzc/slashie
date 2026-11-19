@@ -439,33 +439,6 @@ fn home_dir() -> String {
 }
 
 #[cfg(test)]
-pub(crate) fn test_transport_fixture(base_ms: i64) -> crate::transport::MockFixture {
-    use crate::transport::{Message, MockBehavior, MockFixture};
-    let msg = |id: &str, offset_ms: i64, text: &str| Message {
-        id: id.to_string(),
-        sender: "ou_self".to_string(),
-        created_at_ms: base_ms + offset_ms,
-        chat_type: "p2p".to_string(),
-        text: Some(text.to_string()),
-        top_level: true,
-        recalled: false,
-        link: None,
-    };
-    MockFixture {
-        self_open_id: "ou_self".to_string(),
-        messages: vec![
-            msg("om_ping", 1_000, "/ping"),
-            msg("om_pingpong", 2_000, "/pingpong"),
-            msg("om_multiline", 3_000, "/ping line1\nline2\nline3"),
-            msg("om_meta", 4_000, "/ping rm -rf /; echo pwned"),
-            msg("om_other", 5_000, "/ping from someone else"),
-            msg("om_empty", 6_000, "/ping"),
-        ],
-        behavior: MockBehavior::default(),
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::logging::Logger;
@@ -651,9 +624,11 @@ mod tests {
         let msgs = vec![mkmsg("om_crash", boundary + 1_000, "ou_self", Some("/ping"), true, false)];
         let home = test_home("crash");
         // Simulate a crash after claim: write state with a pending claim.
-        let mut st = State::default();
-        st.polling = true;
-        st.identity = Some("ou_self".into());
+        let mut st = State {
+            polling: true,
+            identity: Some("ou_self".into()),
+            ..State::default()
+        };
         st.add_claim("om_crash", boundary + 2_000);
         save(&home, &st).unwrap();
         let mock = Arc::new(MockTransport::new(fixture_with(msgs)));
