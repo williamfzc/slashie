@@ -1,145 +1,399 @@
 <!doctype html>
-<html>
+<!-- Settings view for the macOS host. Edits the draft through Tauri commands. -->
+<html lang="en">
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Slashie Settings</title>
   <style>
-    :root { color-scheme: light dark; }
-    body { font: 13px -apple-system, sans-serif; margin: 16px; }
-    h2 { font-size: 13px; margin: 12px 0 6px; }
-    .row { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
-    .row input { flex: 1; }
-    .invalid { border-color: #d0342c; outline: 1px solid #d0342c; }
-    .err { color: #d0342c; font-size: 11px; }
-    .footer { display: flex; justify-content: space-between; margin-top: 14px; }
-    .forms { color: gray; font-size: 11px; margin: 6px 0 0; }
-    #message { margin-left: 8px; color: #2a7d2a; }
-    .config-error { color: #d0342c; margin-bottom: 8px; }
+    :root {
+      color-scheme: light dark;
+      font: 13px/1.4 -apple-system, BlinkMacSystemFont, sans-serif;
+      --background: #f5f5f7;
+      --surface: #fff;
+      --ink: #202124;
+      --secondary: #5f636a;
+      --line: #d7d7dc;
+      --accent: #005fce;
+      --error: #ac211e;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --background: #242426;
+        --surface: #303033;
+        --ink: #f2f2f4;
+        --secondary: #b9b9bf;
+        --line: #545459;
+        --accent: #83b9ff;
+        --error: #ff9b91;
+      }
+    }
+
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; background: var(--background); color: var(--ink); }
+    form { display: flex; flex-direction: column; height: 100dvh; }
+    main { flex: 1; overflow: auto; padding: 20px; }
+    fieldset { border: 0; margin: 0; min-inline-size: 0; padding: 0; }
+    h2 { font-size: 14px; margin: 0; }
+    p { margin: 0; }
+    button, select, input, textarea { font: inherit; }
+    button, select {
+      min-height: 30px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--surface);
+      color: var(--ink);
+      padding: 4px 10px;
+    }
+    button:enabled, select:enabled, summary { cursor: pointer; }
+    button:enabled:hover { border-color: var(--secondary); }
+    :is(button, select, input, textarea, summary):focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    :is(button, select, input, textarea):disabled { opacity: .55; }
+    .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+    .interval, .section-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .interval { padding: 12px; }
+    .interval label { font-size: 14px; font-weight: 600; }
+    .interval select { min-width: 111px; padding-inline: 6px; }
+    .routes { margin-top: 18px; }
+    .section-heading { margin-bottom: 8px; }
+    .route-card { padding: 0 8px; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; text-align: start; }
+    .prefix-col { width: 120px; }
+    .action-col { width: 75px; }
+    th { padding: 6px; color: var(--secondary); font-size: 12px; font-weight: 600; text-align: left; }
+    td { border-top: 1px solid var(--line); padding: 5px 6px; vertical-align: top; }
+    td:last-child { text-align: right; }
+    .route-input {
+      display: block;
+      width: 100%;
+      min-height: 30px;
+      color: var(--ink);
+      background: var(--background);
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      padding: 5px 7px;
+      font: 12px/18px ui-monospace, Menlo, monospace;
+    }
+    textarea.route-input { resize: none; field-sizing: content; }
+    .empty-row { color: var(--secondary); padding: 10px 6px; text-align: left; }
+    details { margin-top: 9px; color: var(--secondary); font-size: 12px; }
+    details p { margin: 6px 0 0 13px; }
+    footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 14px;
+      min-height: 60px;
+      border-top: 1px solid var(--line);
+      padding: 10px 20px;
+    }
+    .footer-group { display: flex; align-items: center; gap: 10px; }
+    .footer-group button { flex-shrink: 0; }
+    #status { color: var(--secondary); font-size: 12px; text-align: right; }
+    #save { min-width: 68px; font-weight: 600; }
+    #save:enabled { background: #005fce; border-color: #005fce; color: #fff; }
+    #save:enabled:hover { background: #004fae; }
+    .error { color: var(--error); font-size: 12px; overflow-wrap: anywhere; }
+    #error:not(:empty) {
+      border: 1px solid var(--error);
+      border-radius: 8px;
+      margin-bottom: 12px;
+      padding: 8px 10px;
+    }
+    [aria-invalid="true"] { border-color: var(--error); }
+    .field-error:not(:empty) { display: block; margin-top: 3px; }
   </style>
 </head>
 <body>
-  <div id="config-error" class="config-error" hidden></div>
-  <h2>Polling Interval</h2>
-  <select id="interval">
-    <option value="10">10 seconds</option>
-    <option value="20">20 seconds</option>
-    <option value="30">30 seconds</option>
-    <option value="60">60 seconds</option>
-  </select>
+  <form>
+    <main>
+      <p id="error" class="error" role="alert"></p>
+      <fieldset id="editor" aria-label="Configuration" disabled>
+        <div class="interval card">
+          <label for="interval">Polling interval</label>
+          <div>
+            <select id="interval" aria-describedby="interval-error">
+              <option value="" hidden>—</option>
+              <option value="10">10 seconds</option>
+              <option value="20">20 seconds</option>
+              <option value="30">30 seconds</option>
+              <option value="60">60 seconds</option>
+            </select>
+            <span id="interval-error" class="error field-error"></span>
+          </div>
+        </div>
 
-  <h2>Routes</h2>
-  <div id="routes"></div>
-  <button id="add-route">Add Route</button>
-  <p class="forms">
-    "$SLASHIE_ARGS" passes the text after the slash command; "$SLASHIE_PROMPT"
-    passes that text plus the message source, e.g. <code>codex exec "$SLASHIE_PROMPT"</code>.
-    A fixed command such as <code>echo pong</code> needs no input.
-  </p>
+        <section class="routes" aria-labelledby="routes-title">
+          <div class="section-heading">
+            <h2 id="routes-title">Routes</h2>
+            <button id="add-route" type="button">Add Route</button>
+          </div>
+          <div class="route-card card">
+            <table aria-labelledby="routes-title">
+              <colgroup>
+                <col class="prefix-col" />
+                <col />
+                <col class="action-col" />
+              </colgroup>
+              <thead>
+                <tr><th scope="col">Prefix</th><th scope="col">Command</th><th scope="col" aria-label="Actions"></th></tr>
+              </thead>
+              <tbody id="routes"></tbody>
+              <tbody id="empty-routes" hidden>
+                <tr><td colspan="3" class="empty-row">No routes configured.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </fieldset>
 
-  <div class="footer">
-    <button id="open-log">Open Log</button>
-    <span><span id="message"></span><button id="save">Save</button></span>
-  </div>
+      <details>
+        <summary>Command variables</summary>
+        <p><code>"$SLASHIE_ARGS"</code> passes the text after the prefix. <code>"$SLASHIE_PROMPT"</code> includes that text and the message source.</p>
+        <p>For example, use <code>codex exec "$SLASHIE_PROMPT"</code>. A fixed command like <code>echo pong</code> needs no input.</p>
+      </details>
+    </main>
+
+    <footer>
+      <div class="footer-group">
+        <button id="open-log" type="button" disabled>Open Log</button>
+        <span id="log-error" class="error" role="alert"></span>
+      </div>
+      <div class="footer-group">
+        <span id="status" role="status">Loading settings…</span>
+        <button id="save" type="submit" disabled>Save</button>
+      </div>
+    </footer>
+  </form>
 
   <script>
-    const { invoke } = window.__TAURI__;
-    let snapshot = "";
-    let configPath = "";
-    let configUnparsable = false;
+    // `__TAURI__` requires `withGlobalTauri`; the internals bridge is always
+    // injected, so Settings still works if the global API is unavailable.
+    const invoke =
+      window.__TAURI__?.core?.invoke?.bind(window.__TAURI__.core) ??
+      window.__TAURI_INTERNALS__?.invoke?.bind(window.__TAURI_INTERNALS__);
+    const form = document.querySelector("form");
+    const editor = document.getElementById("editor");
+    const interval = document.getElementById("interval");
+    const routes = document.getElementById("routes");
+    const emptyRoutes = document.getElementById("empty-routes");
+    const addRoute = document.getElementById("add-route");
+    const openLog = document.getElementById("open-log");
+    const logError = document.getElementById("log-error");
+    const save = document.getElementById("save");
+    const status = document.getElementById("status");
+    const error = document.getElementById("error");
+
+    let snapshot = null;
+    let baseline = "";
+    let busy = false;
+    let nextRouteId = 0;
 
     function routeRow(prefix, cmd) {
-      const row = document.createElement("div");
-      row.className = "row";
-      const p = document.createElement("input");
-      p.placeholder = "/prefix";
-      p.value = prefix;
-      const c = document.createElement("input");
-      c.placeholder = "Command";
-      c.value = cmd;
-      const rm = document.createElement("button");
-      rm.textContent = "Remove";
-      rm.onclick = () => row.remove();
-      row.append(p, c, rm);
-      return row;
+      const row = routes.insertRow();
+      const routeId = ++nextRouteId;
+      const prefixInput = document.createElement("input");
+      prefixInput.value = prefix;
+      prefixInput.placeholder = "/prefix";
+      prefixInput.spellcheck = false;
+      prefixInput.autocapitalize = "off";
+      const commandInput = document.createElement("textarea");
+      commandInput.value = cmd;
+      commandInput.placeholder = "echo pong";
+      commandInput.rows = 1;
+      commandInput.wrap = "off";
+      commandInput.spellcheck = false;
+      commandInput.autocapitalize = "off";
+
+      for (const [name, control] of [["prefix", prefixInput], ["cmd", commandInput]]) {
+        const fieldError = document.createElement("span");
+        fieldError.id = `route-${routeId}-${name}-error`;
+        fieldError.className = "error field-error";
+        control.className = "route-input";
+        control.setAttribute("aria-describedby", fieldError.id);
+        row.insertCell().append(control, fieldError);
+      }
+
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "Remove";
+      remove.onclick = () => {
+        const neighbor = row.nextElementSibling ?? row.previousElementSibling;
+        row.remove();
+        labelRoutes();
+        edited();
+        (neighbor?.querySelector("input") ?? addRoute).focus();
+      };
+      row.insertCell().append(remove);
+      return prefixInput;
+    }
+
+    function labelRoutes() {
+      emptyRoutes.hidden = routes.rows.length !== 0;
+      [...routes.rows].forEach((row, index) => {
+        row.querySelector("input").setAttribute("aria-label", `Prefix, route ${index + 1}`);
+        row.querySelector("textarea").setAttribute("aria-label", `Command, route ${index + 1}`);
+        row.querySelector("button").setAttribute("aria-label", `Remove route ${index + 1}`);
+      });
     }
 
     function collectDraft() {
       return {
-        pollInterval: parseInt(document.getElementById("interval").value, 10),
-        routes: [...document.querySelectorAll("#routes .row")].map((row) => ({
-          prefix: row.children[0].value.trim(),
-          cmd: row.children[1].value,
+        pollInterval: Number(interval.value),
+        routes: [...routes.rows].map((row) => ({
+          prefix: row.querySelector("input").value,
+          cmd: row.querySelector("textarea").value,
         })),
       };
     }
 
-    function markErrors(errors) {
-      document.querySelectorAll("#routes .row").forEach((row, i) => {
-        row.children[0].classList.remove("invalid");
-        row.children[1].classList.remove("invalid");
-      });
-      document.getElementById("interval").classList.remove("invalid");
-      let first = null;
-      for (const e of errors) {
-        let el = null;
-        if (e.field === "poll_interval") el = document.getElementById("interval");
-        else if (e.row !== null) el = document.querySelectorAll("#routes .row")[e.row]?.children[e.field === "cmd" ? 1 : 0];
-        if (el) {
-          el.classList.add("invalid");
-          el.title = e.message;
-          first = first || el;
-        }
+    function syncControls() {
+      editor.disabled = snapshot === null || busy;
+      save.disabled = editor.disabled || JSON.stringify(collectDraft()) === baseline;
+    }
+
+    function edited() {
+      error.textContent = "";
+      for (const field of editor.querySelectorAll('[aria-invalid="true"]')) {
+        document.getElementById(field.getAttribute("aria-describedby")).textContent = "";
+        field.removeAttribute("aria-invalid");
       }
+      syncControls();
+      status.textContent = save.disabled ? "" : "Unsaved changes";
+    }
+
+    function markErrors(errors) {
+      let first;
+      for (const issue of errors) {
+        const field = issue.field === "poll_interval"
+          ? interval
+          : routes.rows[issue.row]?.querySelector(issue.field === "cmd" ? "textarea" : "input");
+        if (!field) continue;
+        field.setAttribute("aria-invalid", "true");
+        document.getElementById(field.getAttribute("aria-describedby")).textContent = issue.message;
+        first ??= field;
+      }
+      error.textContent = first ? "Review the highlighted fields." : "The configuration is invalid.";
       return first;
     }
 
-    async function load() {
-      const s = await invoke("get_settings");
-      snapshot = s.snapshot;
-      configPath = s.config_path;
-      configUnparsable = s.config_unparsable;
-      document.getElementById("interval").value = String(s.draft.pollInterval ?? s.draft.poll_interval);
-      const routes = s.draft.routes;
-      const box = document.getElementById("routes");
-      box.innerHTML = "";
-      for (const r of routes) box.appendChild(routeRow(r.prefix, r.cmd));
-      document.getElementById("open-log").disabled = !s.log_available;
-      const errBox = document.getElementById("config-error");
-      if (configUnparsable) {
-        errBox.hidden = false;
-        errBox.textContent = "config.json cannot be parsed: " + configPath + ". Repair the file, then reopen Settings.";
-        document.getElementById("save").disabled = true;
+    async function readSettings() {
+      if (typeof invoke !== "function") throw new Error("The app connection is unavailable.");
+      const settings = await invoke("get_settings");
+      openLog.disabled = !settings.log_available;
+      if (settings.config_unparsable) {
+        throw new Error(`Repair the configuration at ${settings.config_path}, then reopen Settings.`);
+      }
+      if (typeof settings.snapshot !== "string" || !settings.snapshot) {
+        throw new Error("The configuration snapshot is unavailable.");
+      }
+      return settings;
+    }
+
+    function report(message) {
+      try {
+        Promise.resolve(invoke?.("report_settings", { message })).catch(() => {});
+      } catch {
+        // Diagnostics must never change the window's behavior.
       }
     }
 
-    document.getElementById("add-route").onclick = () =>
-      document.getElementById("routes").appendChild(routeRow("", ""));
+    async function load() {
+      try {
+        const settings = await readSettings();
+        interval.value = String(settings.draft.pollInterval);
+        if (!interval.value || !Array.isArray(settings.draft.routes)) {
+          throw new Error("The app returned an invalid configuration.");
+        }
+        for (const route of settings.draft.routes) routeRow(route.prefix, route.cmd);
+        labelRoutes();
+        baseline = JSON.stringify(collectDraft());
+        snapshot = settings.snapshot;
+        report(`loaded ${settings.draft.routes.length} routes`);
+      } catch (failure) {
+        interval.value = "";
+        routes.replaceChildren();
+        error.textContent = `Could not load settings. ${failure.message ?? failure}`;
+        report(`load failed: ${failure.message ?? failure}`);
+      } finally {
+        status.textContent = "";
+        syncControls();
+      }
+    }
 
-    document.getElementById("open-log").onclick = () => invoke("open_log").catch(alert);
+    addRoute.onclick = () => {
+      const prefixInput = routeRow("", "");
+      labelRoutes();
+      edited();
+      prefixInput.focus();
+    };
+    editor.oninput = edited;
 
-    document.getElementById("save").onclick = async () => {
-      const msg = document.getElementById("message");
-      msg.textContent = "";
+    openLog.onclick = async () => {
+      logError.textContent = "";
+      try {
+        await invoke("open_log");
+      } catch (failure) {
+        logError.textContent = `Could not open the log. ${failure.message ?? failure}`;
+      }
+    };
+
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      if (save.disabled) return;
       const draft = collectDraft();
-      const result = await invoke("save_settings_cmd", { snapshot, draft });
-      if (result === "Saved") {
-        msg.textContent = "Saved. Restart Slashie to apply.";
-        snapshot = await invoke("get_settings").then((s) => s.snapshot);
-        return;
+      busy = true;
+      error.textContent = "";
+      status.textContent = "Saving…";
+      syncControls();
+      let invalidField;
+      try {
+        const result = await invoke("save_settings_cmd", { snapshot, draft });
+        if (result === "Saved") {
+          snapshot = null;
+          baseline = JSON.stringify(draft);
+          status.textContent = "Saved. Restart Slashie to apply.";
+          try {
+            const settings = await readSettings();
+            if (JSON.stringify(settings.draft) !== baseline) {
+              throw new Error("The configuration changed after saving.");
+            }
+            snapshot = settings.snapshot;
+          } catch (failure) {
+            error.textContent = `${failure.message ?? failure} Reopen Settings to continue editing.`;
+          }
+        } else {
+          status.textContent = "Unsaved changes";
+          if (result === "FileChanged") {
+            snapshot = null;
+            error.textContent = "The configuration file changed. Reopen Settings to load the latest values.";
+          } else if (result?.Invalid) {
+            invalidField = markErrors(result.Invalid);
+          } else if (result?.Unparsable) {
+            snapshot = null;
+            error.textContent = `Repair the configuration at ${result.Unparsable}, then reopen Settings.`;
+          } else {
+            error.textContent = `Could not save settings. ${result?.Io ?? "The app returned an unexpected response."}`;
+          }
+        }
+      } catch (failure) {
+        status.textContent = "Unsaved changes";
+        error.textContent = `Could not save settings. ${failure.message ?? failure}`;
+      } finally {
+        busy = false;
+        syncControls();
+        invalidField?.focus();
       }
-      if (result === "FileChanged") {
-        alert("The configuration file changed since Settings opened. Reopen Settings and try again.");
-        return;
-      }
-      if (result && result.Invalid) {
-        markErrors(result.Invalid);
-        return;
-      }
-      if (result && result.Unparsable) {
-        alert("config.json cannot be parsed: " + result.Unparsable);
-        return;
-      }
-      if (result && result.Io) alert(result.Io);
     };
 
     load();

@@ -4,6 +4,7 @@
 //! Compiled only behind the `tray` feature; all runtime logic lives in the
 //! shared runtime behind control handles.
 
+use crate::config::Config;
 use crate::runtime::Runtime;
 use crate::settings::{save_settings, SettingsDraft};
 use crate::status::{status_line, RuntimeStatus};
@@ -14,37 +15,29 @@ use tauri::{
     image::Image,
     menu::{CheckMenuItem, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder,
 };
 
 const SCAN_PULSE_DURATION: Duration = Duration::from_millis(500);
 
-pub struct AppState {
-    pub rt: Arc<Runtime>,
-    pub runtime_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
-    pub settings_snapshot: Mutex<String>,
-    pub shutting_down: AtomicBool,
+struct AppState {
+    rt: Arc<Runtime>,
+    runtime_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    shutting_down: AtomicBool,
     polling_item: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
 }
 
 pub fn run(rt: Arc<Runtime>, shutdown: Arc<AtomicBool>) {
-    let snapshot = std::fs::read_to_string(rt.home.join("config.json")).unwrap_or_default();
+    // The shared runtime runs on its own thread so menu controls take
+    // effect while a subprocess is waiting.
+    let rt_for_loop = rt.clone();
+    let runtime_thread = std::thread::spawn(move || rt_for_loop.run());
     let state = AppState {
-        rt: rt.clone(),
-        runtime_thread: Arc::new(Mutex::new(None)),
-        settings_snapshot: Mutex::new(snapshot),
+        rt,
+        runtime_thread: Mutex::new(Some(runtime_thread)),
         shutting_down: AtomicBool::new(false),
         polling_item: Mutex::new(None),
     };
-
-    // The shared runtime runs on its own thread so menu controls take
-    // effect while a subprocess is waiting.
-    let runtime_thread = state.runtime_thread.clone();
-    let rt_for_loop = rt.clone();
-    *runtime_thread.lock().unwrap() = Some(std::thread::spawn(move || {
-        rt_for_loop.run();
-    }));
-    let thread_ref = state.runtime_thread.clone();
 
     tauri::Builder::default()
         .manage(state)
@@ -52,37 +45,67 @@ pub fn run(rt: Arc<Runtime>, shutdown: Arc<AtomicBool>) {
             get_settings,
             save_settings_cmd,
             open_log,
-            get_status
+            get_status,
+            report_settings
         ])
-        .setup(move |app| {
-            build_tray(app.handle().clone(), shutdown.clone(), thread_ref.clone())?;
+        .setup(|app| {
+            build_tray(app.handle().clone())?;
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(move |app, event| match event {
+            // Cmd+Q carries no exit code. Closing Settings only hides the
+            // window, so this path means the user requested a full quit.
+            RunEvent::ExitRequested {
+                code: None, api, ..
+            } => {
+                api.prevent_exit();
+                request_quit(app);
+            }
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => open_settings(app),
+            RunEvent::Exit => {
+                // The system can also terminate the application directly.
+                shutdown.store(true, Ordering::SeqCst);
+                if let Some(handle) = app
+                    .state::<AppState>()
+                    .runtime_thread
+                    .lock()
+                    .unwrap()
+                    .take()
+                {
+                    let _ = handle.join();
+                }
+            }
+            _ => {}
+        });
 }
 
-fn build_tray(
-    app: AppHandle,
-    shutdown: Arc<AtomicBool>,
-    runtime_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let state: tauri::State<AppState> = app.state();
     let polling_now = {
         let st = state.rt.state.lock().unwrap();
         st.polling
     };
 
-    let status_item = MenuItem::with_id(&app, "status", "", false, None::<&str>)?;
+    let initial_status = status_line(&state.rt.status.lock().unwrap());
+    let status_item = MenuItem::with_id(
+        &app,
+        "status",
+        initial_status.unwrap_or_default(),
+        false,
+        None::<&str>,
+    )?;
     let polling =
         CheckMenuItem::with_id(&app, "polling", "Polling", true, polling_now, None::<&str>)?;
     let settings_item = MenuItem::with_id(&app, "settings", "Settings…", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(&app)?;
     let quit = MenuItem::with_id(&app, "quit", "Quit Slashie", true, None::<&str>)?;
-    let menu = tauri::menu::Menu::with_items(
-        &app,
-        &[&status_item, &polling, &settings_item, &sep, &quit],
-    )?;
+    let menu = tauri::menu::Menu::with_items(&app, &[&polling, &settings_item, &sep, &quit])?;
+    if initial_status.is_some() {
+        menu.insert(&status_item, 0)?;
+    }
 
     *state.polling_item.lock().unwrap() = Some(polling.clone());
 
@@ -94,14 +117,7 @@ fn build_tray(
         .tooltip("Slashie")
         .menu(&menu)
         .show_menu_on_left_click(true)
-        .on_menu_event(move |app, event| {
-            handle_menu_event(
-                app,
-                event.id().as_ref(),
-                shutdown.clone(),
-                runtime_thread.clone(),
-            );
-        })
+        .on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()))
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
@@ -114,15 +130,28 @@ fn build_tray(
             }
         })
         .build(&app)?;
-
     // Tauri dispatches the native setters on the main thread. Update only
     // on changes so sampling the pulse doesn't churn the native menu.
     std::thread::spawn(move || {
-        let mut last_text = "";
+        let mut last_text = initial_status;
         let mut last_polling = polling_now;
         let mut showing_pulse = false;
         loop {
             let state: tauri::State<AppState> = app.state();
+            if state.rt.shutdown.load(Ordering::SeqCst)
+                && state
+                    .shutting_down
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            {
+                // SIGINT/SIGTERM only sets the shared flag; finish the
+                // accepted work, then exit the menu-bar host too.
+                if let Some(handle) = state.runtime_thread.lock().unwrap().take() {
+                    let _ = handle.join();
+                }
+                app.exit(0);
+                return;
+            }
             state.rt.refresh_status();
             let status = state.rt.status.lock().unwrap().clone();
             let polling_now = state.rt.state.lock().unwrap().polling;
@@ -138,9 +167,17 @@ fn build_tray(
                 }
                 showing_pulse = pulse;
             }
-            let text = status_line(&status).unwrap_or("");
+            let text = status_line(&status);
             if text != last_text {
-                if status_item.set_text(text).is_err() {
+                let result = match (last_text, text) {
+                    (None, Some(text)) => status_item
+                        .set_text(text)
+                        .and_then(|()| menu.insert(&status_item, 0)),
+                    (Some(_), Some(text)) => status_item.set_text(text),
+                    (Some(_), None) => menu.remove(&status_item),
+                    (None, None) => Ok(()),
+                };
+                if result.is_err() {
                     return;
                 }
                 last_text = text;
@@ -185,12 +222,7 @@ fn pulse_icon(base: &Image<'_>) -> Image<'static> {
     Image::new_owned(rgba, base.width(), base.height())
 }
 
-fn handle_menu_event(
-    app: &AppHandle,
-    id: &str,
-    shutdown: Arc<AtomicBool>,
-    runtime_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
-) {
+fn handle_menu_event(app: &AppHandle, id: &str) {
     let state: tauri::State<AppState> = app.state();
     match id {
         "status" => {}
@@ -230,40 +262,75 @@ fn handle_menu_event(
                 });
             });
         }
-        "settings" => {
-            if let Some(win) = app.get_webview_window("settings") {
-                let _ = win.set_focus();
-            } else {
-                let _ = WebviewWindowBuilder::new(
+        "settings" => open_settings(app),
+        "quit" => request_quit(app),
+        _ => {}
+    }
+}
+
+/// Shared shutdown: request it, wait for the runtime to drain accepted work,
+/// then exit. Idempotent so menu quit, Cmd+Q, and system termination agree.
+fn request_quit(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if state
+        .shutting_down
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    state.rt.status.lock().unwrap().phase = Some(crate::status::Phase::Quitting);
+    state.rt.shutdown.store(true, Ordering::SeqCst);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        if let Some(handle) = state.runtime_thread.lock().unwrap().take() {
+            let _ = handle.join();
+        }
+        app.exit(0);
+    });
+}
+
+fn open_settings(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if state.shutting_down.load(Ordering::SeqCst) {
+        return;
+    }
+    let show = || {
+        let window = match app.get_webview_window("settings") {
+            Some(window) => window,
+            None => {
+                let window = WebviewWindowBuilder::new(
                     app,
                     "settings",
                     WebviewUrl::App("index.html".into()),
                 )
                 .title("Slashie Settings")
-                .build();
+                .inner_size(600.0, 520.0)
+                .center()
+                .build()?;
+                let hide_on_close = window.clone();
+                window.on_window_event(move |event| {
+                    // A menu-bar app keeps running when Settings closes.
+                    // Reloading discards unsaved edits, as documented.
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = hide_on_close.hide();
+                        let _ = hide_on_close.eval("window.location.reload()");
+                    }
+                });
+                window
             }
-        }
-        "quit"
-            if state
-                .shutting_down
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok() =>
-        {
-            // Shared shutdown: request it, wait for the runtime to drain
-            // accepted work, then exit.
-            state.rt.status.lock().unwrap().phase = Some(crate::status::Phase::Quitting);
-            shutdown.store(true, Ordering::SeqCst);
-            let app = app.clone();
-            std::thread::spawn(move || {
-                let handle = runtime_thread.lock().unwrap().take();
-                if let Some(handle) = handle {
-                    let _ = handle.join();
-                }
-                app.cleanup_before_exit();
-                app.exit(0);
-            });
-        }
-        _ => {}
+        };
+        window.unminimize()?;
+        window.show()?;
+        window.set_focus()
+    };
+    if let Err(error) = show() {
+        state
+            .rt
+            .logger
+            .log(&format!("cannot open Settings: {error}"));
     }
 }
 
@@ -280,16 +347,21 @@ struct SettingsPayload {
 
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> SettingsPayload {
-    let cfg = state.rt.config.clone();
-    let snapshot = state.settings_snapshot.lock().unwrap().clone();
-    let log_available = state.rt.home.join("slashie.log").exists();
-    SettingsPayload {
-        draft: SettingsDraft::from_config(&cfg),
-        snapshot,
-        config_unparsable: state.rt.is_intake_blocked()
-            && state.settings_snapshot.lock().unwrap().is_empty(),
-        config_path: state.rt.home.join("config.json").display().to_string(),
-        log_available,
+    SettingsPayload::load(&state.rt.home)
+}
+
+impl SettingsPayload {
+    fn load(home: &std::path::Path) -> Self {
+        let path = home.join("config.json");
+        let snapshot = std::fs::read_to_string(&path).unwrap_or_default();
+        let config = Config::parse(&snapshot);
+        Self {
+            config_unparsable: config.is_err(),
+            draft: SettingsDraft::from_config(&config.unwrap_or_default()),
+            snapshot,
+            config_path: path.display().to_string(),
+            log_available: home.join("slashie.log").exists(),
+        }
     }
 }
 
@@ -310,11 +382,7 @@ fn save_settings_cmd(
 ) -> SaveReply {
     // If the file changed since the window loaded it, reject the save.
     match save_settings(&state.rt.home, &snapshot, &draft) {
-        crate::settings::SaveOutcome::Saved => {
-            *state.settings_snapshot.lock().unwrap() =
-                std::fs::read_to_string(state.rt.home.join("config.json")).unwrap_or_default();
-            SaveReply::Saved
-        }
+        crate::settings::SaveOutcome::Saved => SaveReply::Saved,
         crate::settings::SaveOutcome::Invalid(e) => SaveReply::Invalid(e),
         crate::settings::SaveOutcome::FileChanged => SaveReply::FileChanged,
         crate::settings::SaveOutcome::Unparsable(p) => SaveReply::Unparsable(p),
@@ -334,6 +402,17 @@ fn open_log(state: State<'_, AppState>) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("cannot open log: {}", e))?;
     Ok(())
+}
+
+/// Bounded Settings-window diagnostics for the operational log. The window
+/// has no console of its own; a load failure must remain observable.
+#[tauri::command]
+fn report_settings(state: State<'_, AppState>, message: String) {
+    let message: String = message.chars().take(300).collect();
+    state
+        .rt
+        .logger
+        .log(&format!("settings window: {}", message));
 }
 
 #[derive(serde::Serialize)]
