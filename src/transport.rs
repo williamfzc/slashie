@@ -72,9 +72,10 @@ impl std::fmt::Display for ReplyError {
     }
 }
 
-/// Stable conversation identity used for session mapping and workspace
-/// layout. A topic/thread is a separate conversation from its parent chat.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Stable conversation identity used for session mapping, workspace
+/// layout, and per-conversation mailboxes. A topic/thread is a separate
+/// conversation from its parent chat.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConversationKey {
     pub channel: String,
     pub chat_id: String,

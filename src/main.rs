@@ -8,6 +8,7 @@ mod config;
 mod lark;
 mod lock;
 mod logging;
+mod mailbox;
 mod runtime;
 // Settings draft handling is exercised by the Settings window (tray build);
 // the headless artifact compiles it so both builds share one validator.
@@ -264,6 +265,8 @@ fn main() {
         )
         .unwrap_or_else(|e| fail(&e)),
     );
+    // The mailbox runner reaches process_job through this handle.
+    rt.attach_arc();
 
     if let Some(reason) = rt.intake_blocked.lock().unwrap().clone() {
         logger.log(&format!("ERROR intake blocked: {}", reason));

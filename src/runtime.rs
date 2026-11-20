@@ -1,7 +1,9 @@
 //! Runtime coordinator (DESIGN.md, "Polling and claims"): scans, admission,
-//! durable claims, a serial worker with a bounded queue, pause/resume, and
-//! restart recovery. All state transitions are serialized on one state mutex;
-//! claim updates and pause are persisted before work is handed off.
+//! durable claims, per-conversation mailboxes (src/mailbox.rs) whose workers
+//! run jobs serially within a conversation and in parallel across them,
+//! pause/resume, and restart recovery. All state transitions are serialized
+//! on one state mutex; claim updates and pause are persisted before work is
+//! handed off.
 
 use crate::config::{Config, Route, DEFAULT_TIMEOUT_SECS};
 use crate::logging::{now_ms, Logger};
@@ -10,13 +12,16 @@ use crate::transport::{Channel, TransportError};
 use crate::worker::{build_inputs, run_command_with, SessionEnv};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 
 pub const LOOKBACK_MS: i64 = 5 * 60 * 1000;
 pub const MAX_WAITING_JOBS: usize = 10;
 
 #[derive(Debug)]
 pub struct Job {
+    /// Conversation identity, computed once at admission and carried
+    /// through delivery, execution, and settlement.
+    pub key: crate::transport::ConversationKey,
     pub message: crate::transport::Message,
     pub route: Route,
 }
@@ -40,8 +45,13 @@ pub struct Runtime {
     pub intake_blocked: Mutex<Option<String>>,
     /// Shared status snapshot reflected in the menu bar.
     pub status: Arc<Mutex<crate::status::RuntimeStatus>>,
-    job_tx: mpsc::Sender<Option<Job>>,
-    job_rx: Mutex<Option<mpsc::Receiver<Option<Job>>>>,
+    /// Per-conversation job mailboxes; the run loop delivers what scans
+    /// claim, and shutdown drains them.
+    mailboxes: crate::mailbox::Mailboxes,
+    /// A view of this runtime as an `Arc`, wired after construction so the
+    /// mailbox runner can call back into `process_job` without an `Arc`
+    /// cycle (runtime -> mailboxes -> runner -> runtime).
+    self_arc: Mutex<Option<std::sync::Weak<Runtime>>>,
 }
 
 pub fn error(msg: impl Into<String>) -> String {
@@ -110,8 +120,6 @@ impl Runtime {
             ..Default::default()
         }));
 
-        let (job_tx, job_rx) = mpsc::channel::<Option<Job>>();
-
         let runtime = Runtime {
             config_mtime: Mutex::new(config_mtime(&home)),
             home,
@@ -120,12 +128,12 @@ impl Runtime {
             transport,
             identity,
             logger,
+            mailboxes: crate::mailbox::Mailboxes::new(Arc::clone(&shutdown)),
             shutdown,
             resume_boundary_ms: Mutex::new(now_ms()),
             intake_blocked: Mutex::new(blocked),
             status,
-            job_tx,
-            job_rx: Mutex::new(Some(job_rx)),
+            self_arc: Mutex::new(None),
         };
 
         runtime.bind_identity();
@@ -136,6 +144,14 @@ impl Runtime {
         runtime.refresh_status();
         runtime.status.lock().unwrap().phase = None;
         Ok(runtime)
+    }
+
+    /// Record the `Arc` that will own this runtime, so the mailbox runner
+    /// can reach `process_job`. Callers must hold the runtime in an `Arc`;
+    /// `run` upgrades it per job and is a no-op runner after the owner
+    /// drops it (shutdown has already joined everything by then).
+    pub fn attach_arc(self: &Arc<Self>) {
+        *self.self_arc.lock().unwrap() = Some(Arc::downgrade(self));
     }
 
     /// Verify and persist the identity binding; a changed identity blocks
@@ -283,26 +299,26 @@ impl Runtime {
     }
 
     /// One scan with a fixed end time. Admits eligible messages in creation
-    /// order (message ID tiebreaker), durably claiming before handoff.
-    /// Returns the number of newly claimed messages. `status.scanning`
-    /// spans the scan so the menu bar can show it in flight.
-    pub fn scan_once(&self) -> Result<usize, String> {
+    /// order (message ID tiebreaker), durably claiming each before returning
+    /// it for delivery to its conversation mailbox. `status.scanning` spans
+    /// the scan so the menu bar can show it in flight.
+    pub fn scan_once(&self) -> Result<Vec<Job>, String> {
         self.status.lock().unwrap().scanning = true;
         let result = self.scan_inner();
         self.status.lock().unwrap().scanning = false;
         result
     }
 
-    fn scan_inner(&self) -> Result<usize, String> {
+    fn scan_inner(&self) -> Result<Vec<Job>, String> {
         self.maybe_reload_config();
         self.status.lock().unwrap().last_successful_scan = None;
         if self.shutdown.load(Ordering::SeqCst) || self.is_intake_blocked() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
         let boundary = {
             let st = self.state.lock().unwrap();
             if !st.polling {
-                return Ok(0);
+                return Ok(Vec::new());
             }
             *self.resume_boundary_ms.lock().unwrap()
         };
@@ -312,7 +328,7 @@ impl Runtime {
         // Search can index eligible messages after a scan has completed.
         let start = horizon.max(boundary);
         if start > end {
-            return Ok(0);
+            return Ok(Vec::new());
         }
 
         let ids = match self.transport.search(start, end) {
@@ -337,7 +353,7 @@ impl Runtime {
                 // An incomplete result blocks admission from this scan.
                 self.logger
                     .log(&format!("scan incomplete, admission blocked: {}", m));
-                return Ok(0);
+                return Ok(Vec::new());
             }
         };
 
@@ -357,7 +373,7 @@ impl Runtime {
             Err(TransportError::Incomplete(m)) => {
                 self.logger
                     .log(&format!("scan incomplete, admission blocked: {}", m));
-                return Ok(0);
+                return Ok(Vec::new());
             }
             Err(e) => {
                 self.logger.log(&format!("scan detail failure: {}", e));
@@ -391,7 +407,13 @@ impl Runtime {
         // Creation order, message ID as tiebreaker.
         eligible.sort_by(|a, b| (a.created_at_ms, &a.id).cmp(&(b.created_at_ms, &b.id)));
 
-        let mut claimed = 0;
+        let mut jobs = Vec::new();
+        // Claims this scan has already made per conversation; mailbox
+        // occupancy only moves at delivery, so admission counts them too.
+        let mut claimed_per_key: std::collections::HashMap<
+            crate::transport::ConversationKey,
+            usize,
+        > = std::collections::HashMap::new();
         for m in eligible {
             let route = {
                 let first = m.text.as_ref().unwrap().split_whitespace().next().unwrap();
@@ -401,6 +423,25 @@ impl Runtime {
                 Some(r) => r,
                 None => continue,
             };
+            // Conversation identity is fixed at admission and carried with
+            // the job; the mailbox it names must have room before claiming.
+            let key = self.transport.conversation_key(&m);
+            let extra = claimed_per_key.get(&key).copied().unwrap_or(0);
+            match self.mailboxes.room(&key, extra) {
+                crate::mailbox::Room::Available => {}
+                crate::mailbox::Room::MailboxFull => {
+                    self.logger.log(&format!(
+                        "mailbox full for {}; leaving {} for a later scan",
+                        key.chat_id, m.id
+                    ));
+                    continue;
+                }
+                crate::mailbox::Room::MailboxesExhausted => {
+                    self.logger
+                        .log("conversation slots full; leaving candidates for a later scan");
+                    break;
+                }
+            }
             {
                 let mut st = self.state.lock().unwrap();
                 // Pause invalidates results from a scan already in flight.
@@ -430,8 +471,12 @@ impl Runtime {
             }
             self.logger
                 .log(&format!("claimed {} for route {}", m.id, route.prefix));
-            self.job_tx.send(Some(Job { message: m, route })).unwrap();
-            claimed += 1;
+            *claimed_per_key.entry(key.clone()).or_insert(0) += 1;
+            jobs.push(Job {
+                key,
+                message: m,
+                route,
+            });
         }
 
         // Complete scan: record its end and prune settled claims that have
@@ -455,7 +500,7 @@ impl Runtime {
                 status.last_successful_scan = Some(std::time::Instant::now());
             }
         }
-        Ok(claimed)
+        Ok(jobs)
     }
 
     /// Run one job to completion: processing reaction, command, reply, settle.
@@ -468,7 +513,8 @@ impl Runtime {
                 ));
             }
         }
-        let key = self.transport.conversation_key(&job.message);
+        // Fixed at admission; a config swap mid-queue never reroutes a job.
+        let key = job.key.clone();
         let mut session = SessionEnv {
             channel: key.channel.clone(),
             chat_id: key.chat_id.clone(),
@@ -578,48 +624,48 @@ impl Runtime {
         let _ = timeout_secs;
     }
 
-    /// Foreground loop: scan at the configured interval until shutdown. The
-    /// worker runs on its own thread so controls take effect while a command
-    /// is waiting.
-    pub fn run(&self) {
-        let rx = self
-            .job_rx
+    /// Foreground loop: scan at the configured interval until shutdown.
+    /// Claimed jobs go to their conversation mailboxes, where each
+    /// conversation's worker runs them serially while conversations
+    /// progress in parallel.
+    pub fn run(self: &Arc<Self>) {
+        // The runner hands each mailbox job back into the runtime; the
+        // Weak inside keeps the Arc cycle broken (attach_arc).
+        let weak = self
+            .self_arc
             .lock()
             .unwrap()
-            .take()
-            .expect("run() called twice");
-        let tx = self.job_tx.clone();
-        std::thread::scope(|s| {
-            let worker = s.spawn(move || {
-                while let Ok(Some(job)) = rx.recv() {
-                    self.process_job(job);
-                }
-            });
-
-            // Re-read each cycle so a saved interval change applies without
-            // a restart (one scan of latency).
-            let interval =
-                std::time::Duration::from_secs(self.config.lock().unwrap().poll_interval.max(1));
-            while !self.shutdown.load(Ordering::SeqCst) {
-                if let Err(e) = self.scan_once() {
-                    // Slice note: exponential backoff up to five minutes arrives
-                    // with the real adapter; sleep one interval for now.
-                    self.logger.log(&format!("scan failed, will retry: {}", e));
-                }
-                let wake = std::time::Instant::now() + interval;
-                while std::time::Instant::now() < wake && !self.shutdown.load(Ordering::SeqCst) {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
+            .clone()
+            .expect("run before attach_arc");
+        self.mailboxes.set_runner(Arc::new(move |job| {
+            if let Some(runtime) = weak.upgrade() {
+                runtime.process_job(job);
             }
+        }));
 
-            // Shared shutdown: stop intake, drain accepted work; the active
-            // command group terminates via the shutdown flag in run_command.
-            self.status.lock().unwrap().phase = Some(crate::status::Phase::Quitting);
-            self.logger.log("shutdown: draining accepted work");
-            let _ = tx.send(None);
-            drop(tx);
-            let _ = worker.join();
-        });
+        // Re-read each cycle so a saved interval change applies without
+        // a restart (one scan of latency).
+        let interval =
+            std::time::Duration::from_secs(self.config.lock().unwrap().poll_interval.max(1));
+        while !self.shutdown.load(Ordering::SeqCst) {
+            match self.scan_once() {
+                Ok(jobs) if !jobs.is_empty() => self.mailboxes.deliver(jobs),
+                Ok(_) => {}
+                // Slice note: exponential backoff up to five minutes arrives
+                // with the real adapter; sleep one interval for now.
+                Err(e) => self.logger.log(&format!("scan failed, will retry: {}", e)),
+            }
+            let wake = std::time::Instant::now() + interval;
+            while std::time::Instant::now() < wake && !self.shutdown.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+
+        // Shared shutdown: stop intake, drain accepted work; the active
+        // command group terminates via the shutdown flag in run_command.
+        self.status.lock().unwrap().phase = Some(crate::status::Phase::Quitting);
+        self.logger.log("shutdown: draining accepted work");
+        self.mailboxes.drain_and_join();
         self.logger.log("shutdown complete");
     }
 }
@@ -687,6 +733,15 @@ mod tests {
             self_open_id: "ou_self".into(),
             messages: msgs,
             behavior: MockBehavior::default(),
+        }
+    }
+
+    /// The conversation key for test messages (matches mkmsg's chat ids).
+    fn test_key(chat: &str, topic: Option<&str>) -> ConversationKey {
+        ConversationKey {
+            channel: "feishu".into(),
+            chat_id: chat.into(),
+            topic_id: topic.map(str::to_string),
         }
     }
 
@@ -762,7 +817,7 @@ mod tests {
         }
         // Polling off => scan admits nothing.
         *rt.resume_boundary_ms.lock().unwrap() = 0;
-        assert_eq!(rt.scan_once().unwrap(), 0);
+        assert_eq!(rt.scan_once().unwrap().len(), 0);
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -823,7 +878,7 @@ mod tests {
         ];
         let (rt, _mock, home) = init_rt("admission", fixture_with(msgs), boundary);
         let claimed = rt.scan_once().unwrap();
-        assert_eq!(claimed, 1, "only the exact /ping is eligible");
+        assert_eq!(claimed.len(), 1, "only the exact /ping is eligible");
         let st = load_or_init(&home).unwrap();
         match st {
             StateLoad::Loaded(s) => {
@@ -848,9 +903,9 @@ mod tests {
             false,
         )];
         let (rt, _mock, home) = init_rt("duplicate", fixture_with(msgs), boundary);
-        assert_eq!(rt.scan_once().unwrap(), 1);
+        assert_eq!(rt.scan_once().unwrap().len(), 1);
         // Same message delivered again in a later scan (duplicate delivery).
-        assert_eq!(rt.scan_once().unwrap(), 0);
+        assert_eq!(rt.scan_once().unwrap().len(), 0);
         let st = match load_or_init(&home).unwrap() {
             StateLoad::Loaded(s) => s,
             _ => panic!(),
@@ -871,7 +926,7 @@ mod tests {
             false,
         );
         let (mut rt, _, home) = init_rt("late_index", fixture_with(vec![]), boundary);
-        assert_eq!(rt.scan_once().unwrap(), 0);
+        assert_eq!(rt.scan_once().unwrap().len(), 0);
         let st = match load_or_init(&home).unwrap() {
             StateLoad::Loaded(s) => s,
             _ => panic!(),
@@ -880,8 +935,8 @@ mod tests {
 
         // The same message becomes visible to search only after that scan.
         rt.transport = Arc::new(MockTransport::new(fixture_with(vec![message])));
-        assert_eq!(rt.scan_once().unwrap(), 1);
-        assert_eq!(rt.scan_once().unwrap(), 0);
+        assert_eq!(rt.scan_once().unwrap().len(), 1);
+        assert_eq!(rt.scan_once().unwrap().len(), 0);
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -904,7 +959,8 @@ mod tests {
         let (rt, _mock, home) = init_rt("queue", fixture_with(msgs), boundary);
         let claimed = rt.scan_once().unwrap();
         assert_eq!(
-            claimed, MAX_WAITING_JOBS,
+            claimed.len(),
+            MAX_WAITING_JOBS,
             "only 10 reserved; rest wait for a later scan"
         );
         let st = match load_or_init(&home).unwrap() {
@@ -912,12 +968,10 @@ mod tests {
             _ => panic!(),
         };
         assert_eq!(st.claims.len(), MAX_WAITING_JOBS);
-        let job_rx = rt.job_rx.lock().unwrap();
-        for _ in 0..2 {
-            let job = job_rx.as_ref().unwrap().try_recv().unwrap().unwrap();
+        for job in claimed {
             rt.process_job(job);
         }
-        assert_eq!(rt.scan_once().unwrap(), 2);
+        assert_eq!(rt.scan_once().unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -934,8 +988,9 @@ mod tests {
             false,
         )];
         let (rt, mock, home) = init_rt("once", fixture_with(msgs), boundary);
-        assert_eq!(rt.scan_once().unwrap(), 1);
+        assert_eq!(rt.scan_once().unwrap().len(), 1);
         let job = Job {
+            key: test_key("oc_test", None),
             message: mkmsg(
                 "om_once",
                 boundary + 1_000,
@@ -960,7 +1015,7 @@ mod tests {
         };
         assert_eq!(st.claims[0].status, ClaimStatus::Settled);
         assert_eq!(st.claims[0].outcome.as_deref(), Some("exit:reply_sent"));
-        assert_eq!(rt.scan_once().unwrap(), 0);
+        assert_eq!(rt.scan_once().unwrap().len(), 0);
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -978,12 +1033,16 @@ mod tests {
         let mut fixture = fixture_with(vec![m.clone()]);
         fixture.behavior.reaction_rejected = true;
         let (rt, mock, home) = init_rt("rejected_reaction", fixture, boundary);
-        assert_eq!(rt.scan_once().unwrap(), 1);
+        assert_eq!(rt.scan_once().unwrap().len(), 1);
         assert!(rt.status.lock().unwrap().last_successful_scan.is_some());
         // Bind the route first: a lock guard inside the call argument would
         // live across process_job and deadlock it.
         let route = rt.config.lock().unwrap().routes[0].clone();
-        rt.process_job(Job { message: m, route });
+        rt.process_job(Job {
+            key: test_key("oc_test", None),
+            message: m,
+            route,
+        });
         assert_eq!(*mock.reaction_attempts.lock().unwrap(), ["om_reaction"]);
         assert_eq!(mock.reply_records()[0].text, "pong");
         rt.apply_poll_setting(false).unwrap();
@@ -1036,16 +1095,19 @@ mod tests {
         };
 
         rt.process_job(Job {
+            key: test_key("oc_one", None),
             message: message("om_one_a", "oc_one"),
             route: route.clone(),
         });
         assert_eq!(read("oc_one"), "0|oc_one");
         rt.process_job(Job {
+            key: test_key("oc_one", None),
             message: message("om_one_b", "oc_one"),
             route: route.clone(),
         });
         assert_eq!(read("oc_one"), "1|oc_one");
         rt.process_job(Job {
+            key: test_key("oc_two", None),
             message: message("om_two_a", "oc_two"),
             route: route.clone(),
         });
@@ -1114,16 +1176,19 @@ mod tests {
         };
 
         rt.process_job(Job {
+            key: test_key("oc_chat", Some("omt_a")),
             message: message("om_topic_a1", Some("omt_a")),
             route: route.clone(),
         });
         assert_eq!(read("omt_a"), "feishu|oc_chat|omt_a|0|omt_a");
         rt.process_job(Job {
+            key: test_key("oc_chat", Some("omt_a")),
             message: message("om_topic_a2", Some("omt_a")),
             route: route.clone(),
         });
         assert_eq!(read("omt_a"), "feishu|oc_chat|omt_a|1|omt_a");
         rt.process_job(Job {
+            key: test_key("oc_chat", Some("omt_b")),
             message: message("om_topic_b1", Some("omt_b")),
             route: route.clone(),
         });
@@ -1197,7 +1262,7 @@ mod tests {
             fixture_with(vec![root, reply, plain]),
             boundary,
         );
-        assert_eq!(rt.scan_once().unwrap(), 2);
+        assert_eq!(rt.scan_once().unwrap().len(), 2);
         let st = rt.state.lock().unwrap();
         assert!(st.is_consumed("om_topic_root"));
         assert!(st.is_consumed("om_topic_reply"));
@@ -1224,7 +1289,7 @@ mod tests {
             st.add_claim("om_source", now);
             st.settle_claim("om_source", now, "exit:reply_sent", Some("om_own_reply"));
         }
-        assert_eq!(rt.scan_once().unwrap(), 0);
+        assert_eq!(rt.scan_once().unwrap().len(), 0);
         assert!(!rt.state.lock().unwrap().is_consumed("om_own_reply"));
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -1277,7 +1342,7 @@ mod tests {
             Some("interrupted_on_restart")
         );
         // It is consumed: no re-run, no reply.
-        assert_eq!(rt.scan_once().unwrap(), 0);
+        assert_eq!(rt.scan_once().unwrap().len(), 0);
         assert_eq!(mock.reply_records().len(), 0);
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -1305,10 +1370,10 @@ mod tests {
             ),
         ];
         let (rt, mock, home) = init_rt("pause", fixture_with(msgs), boundary);
-        assert_eq!(rt.scan_once().unwrap(), 2);
+        assert_eq!(rt.scan_once().unwrap().len(), 2);
         // Pause: stops new admissions.
         let _ = rt.apply_poll_setting(false);
-        assert_eq!(rt.scan_once().unwrap(), 0);
+        assert_eq!(rt.scan_once().unwrap().len(), 0);
         // Accepted work can still finish: process all pending jobs directly.
         let st = rt.state.lock().unwrap();
         let ids: Vec<String> = st
@@ -1323,6 +1388,7 @@ mod tests {
             // would live across process_job and deadlock it.
             let route = rt.config.lock().unwrap().routes[0].clone();
             rt.process_job(Job {
+                key: test_key("oc_test", None),
                 message: mkmsg(&id, boundary, "ou_self", Some("/ping"), true, false),
                 route,
             });
@@ -1333,7 +1399,7 @@ mod tests {
         let now2 = now_ms();
         let _ = rt.apply_poll_setting(true);
         *rt.resume_boundary_ms.lock().unwrap() = now2;
-        assert_eq!(rt.scan_once().unwrap(), 0);
+        assert_eq!(rt.scan_once().unwrap().len(), 0);
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1351,7 +1417,7 @@ mod tests {
         )]);
         f.behavior.mget_missing_ids = vec!["om_blk".into()];
         let (rt, mock, home) = init_rt("incomplete", f, boundary);
-        assert_eq!(rt.scan_once().unwrap(), 0);
+        assert_eq!(rt.scan_once().unwrap().len(), 0);
         assert!(rt.status.lock().unwrap().last_successful_scan.is_none());
         assert!(mock.reaction_attempts.lock().unwrap().is_empty());
         let st = match load_or_init(&home).unwrap() {
@@ -1402,7 +1468,7 @@ mod tests {
         )
         .unwrap();
         assert!(rt2.is_intake_blocked());
-        assert_eq!(rt2.scan_once().unwrap(), 0);
+        assert!(rt2.scan_once().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1430,7 +1496,7 @@ mod tests {
         )
         .unwrap();
         assert!(rt.is_intake_blocked());
-        assert_eq!(rt.scan_once().unwrap(), 0);
+        assert_eq!(rt.scan_once().unwrap().len(), 0);
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1488,9 +1554,10 @@ mod tests {
             )]);
             f.behavior = behavior;
             let (rt, mock, home) = init_rt("replyfail", f, boundary);
-            assert_eq!(rt.scan_once().unwrap(), 1);
+            assert_eq!(rt.scan_once().unwrap().len(), 1);
             let route = rt.config.lock().unwrap().routes[0].clone();
             rt.process_job(Job {
+                key: test_key("oc_test", None),
                 message: mkmsg(
                     "om_r",
                     boundary + 1_000,
@@ -1512,6 +1579,14 @@ mod tests {
                 "exit:reply_uncertain"
             };
             assert_eq!(st.claims[0].outcome.as_deref(), Some(want));
+            // Failure must be perceivable: the menu-bar status line speaks.
+            let status = rt.status.lock().unwrap();
+            if rejected {
+                assert!(status.reply_failed, "definitive rejection surfaces");
+            } else {
+                assert!(status.reply_unconfirmed, "uncertain delivery surfaces");
+            }
+            drop(status);
             let _ = std::fs::remove_dir_all(&home);
         }
     }
@@ -1529,11 +1604,12 @@ mod tests {
             false,
         )];
         let (rt, mock, home) = init_rt("multiline", fixture_with(msgs), boundary);
-        assert_eq!(rt.scan_once().unwrap(), 1);
+        assert_eq!(rt.scan_once().unwrap().len(), 1);
         // Route echoes its args back with markers.
         rt.config.lock().unwrap().routes[0].cmd = "printf '[%s]' \"$SLASHIE_ARGS\"".into();
         let route = rt.config.lock().unwrap().routes[0].clone();
         rt.process_job(Job {
+            key: test_key("oc_test", None),
             message: mkmsg(
                 "om_ml",
                 boundary + 1_000,
@@ -1613,7 +1689,7 @@ mod tests {
         );
         m.chat_type = "group".into();
         let (rt, _mock, _home) = init_rt("group", fixture_with(vec![m]), boundary);
-        assert_eq!(rt.scan_once().unwrap(), 1);
+        assert_eq!(rt.scan_once().unwrap().len(), 1);
     }
 
     #[test]
@@ -1647,7 +1723,7 @@ mod tests {
         .unwrap();
 
         // /late is not configured yet.
-        assert_eq!(rt.scan_once().unwrap(), 0);
+        assert_eq!(rt.scan_once().unwrap().len(), 0);
 
         // An agent (or the CLI) edits the file directly while we run.
         let mut cfg = Config::default();
@@ -1666,7 +1742,7 @@ mod tests {
         .unwrap();
 
         // The next scan picks it up without any restart.
-        assert_eq!(rt.scan_once().unwrap(), 1);
+        assert_eq!(rt.scan_once().unwrap().len(), 1);
         assert!(rt
             .config
             .lock()
@@ -1678,7 +1754,7 @@ mod tests {
         // An invalid edit keeps the previous configuration.
         std::thread::sleep(std::time::Duration::from_millis(10));
         std::fs::write(home.join("config.json"), "{oops").unwrap();
-        assert_eq!(rt.scan_once().unwrap(), 0);
+        assert_eq!(rt.scan_once().unwrap().len(), 0);
         assert!(rt
             .config
             .lock()

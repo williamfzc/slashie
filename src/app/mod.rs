@@ -86,6 +86,7 @@ pub fn run(rt: Arc<Runtime>, shutdown: Arc<AtomicBool>) {
     let _activity = prevent_app_nap();
     // The shared runtime runs on its own thread so menu controls take
     // effect while a subprocess is waiting.
+    rt.attach_arc();
     let rt_for_loop = rt.clone();
     let runtime_thread = std::thread::spawn(move || rt_for_loop.run());
     let state = AppState {
