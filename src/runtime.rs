@@ -239,8 +239,16 @@ impl Runtime {
 
     /// One scan with a fixed end time. Admits eligible messages in creation
     /// order (message ID tiebreaker), durably claiming before handoff.
-    /// Returns the number of newly claimed messages.
+    /// Returns the number of newly claimed messages. `status.scanning`
+    /// spans the scan so the menu bar can show it in flight.
     pub fn scan_once(&self) -> Result<usize, String> {
+        self.status.lock().unwrap().scanning = true;
+        let result = self.scan_inner();
+        self.status.lock().unwrap().scanning = false;
+        result
+    }
+
+    fn scan_inner(&self) -> Result<usize, String> {
         self.status.lock().unwrap().last_successful_scan = None;
         if self.shutdown.load(Ordering::SeqCst) || self.is_intake_blocked() {
             return Ok(0);

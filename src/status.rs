@@ -18,6 +18,9 @@ pub struct RuntimeStatus {
     /// Monotonic time of the last complete scan for the menu-bar pulse.
     #[serde(skip)]
     pub last_successful_scan: Option<std::time::Instant>,
+    /// A scan is in flight right now (drives the menu-bar breathing dot).
+    #[serde(skip)]
+    pub scanning: bool,
     /// Starting or shutting down.
     pub phase: Option<Phase>,
 }
@@ -101,6 +104,7 @@ mod tests {
             finishing_accepted: true,
             retrying: Some(RetryKind::RateLimited),
             last_successful_scan: None,
+            scanning: false,
         };
         assert_eq!(status_line(&s), Some("Quitting…"));
         s.phase = Some(Phase::Starting);

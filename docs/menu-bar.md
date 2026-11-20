@@ -10,7 +10,15 @@ Feishu carries requests and results. The menu bar controls polling, and Settings
 
 ## Status item and menu
 
-Use one fixed-size `/` template icon with the accessible name `Slashie`. macOS supplies its appearance and native menu behavior. A small dot briefly appears beside the slash after a complete, successful Feishu scan, including an empty scan. Startup, pause, scan failures, retries, and shutdown show the plain slash.
+Use one fixed-size `/` template icon with the accessible name `Slashie`. macOS supplies its appearance and native menu behavior. The icon is a state indicator; the first applicable frame wins.
+
+| State | Icon |
+| --- | --- |
+| Polling paused | The whole glyph dimmed. |
+| Startup, shutdown, a fault, or a retry (any state with a status line) | The plain glyph; the read-only line carries the detail. |
+| A scan in flight | A small dot beside the slash breathing bright and dim about once a second. |
+| Within about a second and a half after a complete scan, including an empty one | The same dot flaring bright. |
+| Polling healthy between scans | The dot resting dim. |
 
 A primary click or keyboard activation opens the menu. This is the enabled state:
 
@@ -59,7 +67,8 @@ Save validates the entire draft. Mark invalid fields in place, including blank c
 
 - From Finder, check the native menu in light and dark appearances. Verify keyboard navigation, Escape dismissal, and VoiceOver reading `Polling` and its checked state.
 - Launch both a bundled and an unbundled dev build and verify that neither shows a Dock icon or a Cmd+Tab entry while the tray item stays available.
-- With polling enabled, watch a successful scan with no matching requests. Verify that the dot appears briefly and leaves the icon and neighboring items in place. Verify the plain slash during pause, scan failure, and shutdown.
+- Verify the dimmed glyph while polling is paused and the resting dot while it is healthy. Watch a scan in flight and confirm the dot breathes, then flares after the scan completes (including an empty scan) and returns to resting. Verify the plain glyph, without the dot, during startup, scan failure, retry, and shutdown, and confirm the icon and neighboring items stay in place throughout.
+- Verify the frames read at a glance in light and dark appearances and that the dot is visible without relying on color alone.
 - Turn polling off during a command and verify the [pause behavior](product.md#pause-and-recovery). Exercise backoff, failed setting writes, and an uncertain reply. Confirm normal states use the checkmark alone.
 - Open Settings twice. Change the interval and add a route, then save and restart. Test both input forms with multiline text. Reject a duplicate prefix and verify that existing route options survive edits. Confirm that the log opens from Settings.
 - Quit during a command and verify cleanup before another instance can start. Launch from Finder while headless holds the lock and verify the startup alert.

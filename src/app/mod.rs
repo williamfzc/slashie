@@ -1,8 +1,8 @@
-//! macOS menu-bar shell (menu-bar.md): one tray item with a `/` template
-//! icon and scan pulse, the native Polling check item, status copy, the single
-//! Settings window over bundled local assets, and shared shutdown/quit.
-//! Compiled only behind the `tray` feature; all runtime logic lives in the
-//! shared runtime behind control handles.
+//! macOS menu-bar shell (menu-bar.md): one tray item whose `/` template icon
+//! frames express polling state, the native Polling check item, status copy,
+//! the single Settings window over bundled local assets, and shared
+//! shutdown/quit. Compiled only behind the `tray` feature; all runtime logic
+//! lives in the shared runtime behind control handles.
 
 use crate::config::Config;
 use crate::runtime::Runtime;
@@ -18,7 +18,51 @@ use tauri::{
     AppHandle, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder,
 };
 
-const SCAN_PULSE_DURATION: Duration = Duration::from_millis(500);
+/// How long the dot stays bright after a complete scan, including an
+/// empty one (menu-bar.md "Status item and menu").
+const SCAN_FLASH_DURATION: Duration = Duration::from_millis(1500);
+
+/// Sampling cadence of the tray thread; the classifier pairs consecutive
+/// samples so an in-flight scan breathes at about once a second.
+const SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
+
+/// The menu-bar icon frames (menu-bar.md "Status item and menu").
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Frame {
+    /// Polling paused: the whole glyph dimmed.
+    Dimmed,
+    /// The status line speaks (startup, faults, retries): the plain glyph.
+    Plain,
+    /// Healthy polling between scans: the resting dim dot.
+    DotIdle,
+    /// A scan in flight (breathing) or just completed (flash): the bright dot.
+    DotActive,
+}
+
+/// Classify the icon frame for the current runtime state. `tick` counts
+/// loop iterations (~250 ms) so an in-flight scan breathes at ~500 ms.
+fn tray_frame(status: &RuntimeStatus, polling: bool, now: Instant, tick: u64) -> Frame {
+    if !polling {
+        return Frame::Dimmed;
+    }
+    if status_line(status).is_some() {
+        return Frame::Plain;
+    }
+    if status.scanning {
+        return if (tick / 2).is_multiple_of(2) {
+            Frame::DotActive
+        } else {
+            Frame::DotIdle
+        };
+    }
+    if status
+        .last_successful_scan
+        .is_some_and(|scan| now.duration_since(scan) < SCAN_FLASH_DURATION)
+    {
+        return Frame::DotActive;
+    }
+    Frame::DotIdle
+}
 
 struct AppState {
     rt: Arc<Runtime>,
@@ -120,7 +164,9 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     *state.polling_item.lock().unwrap() = Some(polling.clone());
 
     let icon = Image::from_bytes(include_bytes!("assets/tray-template.png"))?;
-    let pulse_icon = pulse_icon(&icon);
+    let dimmed_icon = dim_icon(&icon);
+    let dot_idle_icon = dot_icon(&icon, dot_alphas(false));
+    let dot_active_icon = dot_icon(&icon, dot_alphas(true));
     let tray = TrayIconBuilder::with_id("slashie-tray")
         .icon(icon.clone())
         .icon_as_template(true)
@@ -141,11 +187,13 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         })
         .build(&app)?;
     // Tauri dispatches the native setters on the main thread. Update only
-    // on changes so sampling the pulse doesn't churn the native menu.
+    // on changes so sampling the frame doesn't churn the native menu.
     std::thread::spawn(move || {
         let mut last_text = initial_status;
         let mut last_polling = polling_now;
-        let mut showing_pulse = false;
+        // The builder installed the plain glyph.
+        let mut last_frame = Frame::Plain;
+        let mut tick: u64 = 0;
         loop {
             let state: tauri::State<AppState> = app.state();
             if state.rt.shutdown.load(Ordering::SeqCst)
@@ -165,17 +213,26 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             state.rt.refresh_status();
             let status = state.rt.status.lock().unwrap().clone();
             let polling_now = state.rt.state.lock().unwrap().polling;
-            let pulse = pulse_visible(&status, polling_now, Instant::now())
-                && !state.shutting_down.load(Ordering::SeqCst);
-            if pulse != showing_pulse {
-                let next_icon = if pulse { &pulse_icon } else { &icon };
+            let frame = if state.shutting_down.load(Ordering::SeqCst) {
+                Frame::Plain
+            } else {
+                tray_frame(&status, polling_now, Instant::now(), tick)
+            };
+            tick = tick.wrapping_add(1);
+            if frame != last_frame {
+                let next_icon = match frame {
+                    Frame::Dimmed => &dimmed_icon,
+                    Frame::Plain => &icon,
+                    Frame::DotIdle => &dot_idle_icon,
+                    Frame::DotActive => &dot_active_icon,
+                };
                 if tray
                     .set_icon_with_as_template(Some(next_icon.clone()), true)
                     .is_err()
                 {
                     return;
                 }
-                showing_pulse = pulse;
+                last_frame = frame;
             }
             let text = status_line(&status);
             if text != last_text {
@@ -198,7 +255,7 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 last_polling = polling_now;
             }
-            std::thread::sleep(SCAN_PULSE_DURATION / 2);
+            std::thread::sleep(SAMPLE_INTERVAL);
         }
     });
     Ok(())
@@ -214,31 +271,46 @@ fn prevent_app_nap() -> impl Sized {
     )
 }
 
-fn pulse_visible(status: &RuntimeStatus, polling: bool, now: Instant) -> bool {
-    polling
-        && status.phase.is_none()
-        && status.operator_action.is_none()
-        && status.retrying.is_none()
-        && status
-            .last_successful_scan
-            .is_some_and(|scan| now.duration_since(scan) < SCAN_PULSE_DURATION)
+fn dot_alphas(bright: bool) -> [[u8; 4]; 4] {
+    if bright {
+        [
+            [32, 176, 176, 32],
+            [176, 255, 255, 176],
+            [176, 255, 255, 176],
+            [32, 176, 176, 32],
+        ]
+    } else {
+        [
+            [12, 72, 72, 12],
+            [72, 104, 104, 72],
+            [72, 104, 104, 72],
+            [12, 72, 72, 12],
+        ]
+    }
 }
 
-fn pulse_icon(base: &Image<'_>) -> Image<'static> {
+fn dot_icon(base: &Image<'_>, alphas: [[u8; 4]; 4]) -> Image<'static> {
     let mut rgba = base.rgba().to_vec();
     // Add a small round dot in the transparent space beside the slash tail.
-    let alpha = [
-        [32, 176, 176, 32],
-        [176, 255, 255, 176],
-        [176, 255, 255, 176],
-        [32, 176, 176, 32],
-    ];
-    for (y, row) in alpha.into_iter().enumerate() {
+    for (y, row) in alphas.into_iter().enumerate() {
         for (x, opacity) in row.into_iter().enumerate() {
             let pixel = ((24 + y) * base.width() as usize + 6 + x) * 4;
             rgba[pixel..pixel + 4].copy_from_slice(&[0, 0, 0, opacity]);
         }
     }
+    Image::new_owned(rgba, base.width(), base.height())
+}
+
+/// Template icons carry their shape in alpha; dimming it signals paused.
+fn dim_icon(base: &Image<'_>) -> Image<'static> {
+    let dim = |v: u8| ((v as u32 * 35) / 100) as u8;
+    let rgba: Vec<u8> = base
+        .rgba()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|px| [dim(px[0]), dim(px[1]), dim(px[2]), dim(px[3])])
+        .collect();
     Image::new_owned(rgba, base.width(), base.height())
 }
 
@@ -461,27 +533,52 @@ mod tests {
     use crate::status::{OperatorFault, Phase, RetryKind};
 
     #[test]
-    fn only_a_recent_successful_scan_pulses_while_polling() {
+    fn frames_distinguish_paused_fault_and_polling() {
         let now = Instant::now();
-        let mut status = RuntimeStatus::default();
-        assert!(!pulse_visible(&status, true, now));
-        status.last_successful_scan = Some(now);
-        assert!(pulse_visible(&status, true, now));
-        assert!(!pulse_visible(&status, true, now + SCAN_PULSE_DURATION));
-        assert!(!pulse_visible(&status, false, now));
+        // Paused dims the glyph regardless of other state.
+        assert_eq!(
+            tray_frame(&RuntimeStatus::default(), false, now, 0),
+            Frame::Dimmed
+        );
+        // Healthy polling rests with the dim dot.
+        assert_eq!(
+            tray_frame(&RuntimeStatus::default(), true, now, 0),
+            Frame::DotIdle
+        );
 
-        for phase in [Phase::Starting, Phase::Quitting] {
-            status.phase = Some(phase);
-            assert!(!pulse_visible(&status, true, now));
-        }
+        // A completed scan flashes, then rests again.
+        let mut status = RuntimeStatus {
+            last_successful_scan: Some(now),
+            ..Default::default()
+        };
+        assert_eq!(tray_frame(&status, true, now, 0), Frame::DotActive);
+        assert_eq!(
+            tray_frame(&status, true, now + SCAN_FLASH_DURATION, 0),
+            Frame::DotIdle
+        );
+
+        // A scan in flight breathes with the tick: two samples bright,
+        // two dim, repeating.
+        status.scanning = true;
+        assert_eq!(tray_frame(&status, true, now, 0), Frame::DotActive);
+        assert_eq!(tray_frame(&status, true, now, 1), Frame::DotActive);
+        assert_eq!(tray_frame(&status, true, now, 2), Frame::DotIdle);
+        assert_eq!(tray_frame(&status, true, now, 3), Frame::DotIdle);
+        assert_eq!(tray_frame(&status, true, now, 4), Frame::DotActive);
+        assert_eq!(tray_frame(&status, false, now, 0), Frame::Dimmed);
+
+        // The status line carries phases and faults; the dot drops out.
+        status.scanning = false;
+        status.last_successful_scan = Some(now);
+        status.phase = Some(Phase::Starting);
+        assert_eq!(tray_frame(&status, true, now, 0), Frame::Plain);
+        status.phase = Some(Phase::Quitting);
+        assert_eq!(tray_frame(&status, true, now, 0), Frame::Plain);
         status.phase = None;
         status.operator_action = Some(OperatorFault::SignInToFeishu);
-        assert!(!pulse_visible(&status, true, now));
+        assert_eq!(tray_frame(&status, true, now, 0), Frame::Plain);
         status.operator_action = None;
         status.retrying = Some(RetryKind::RateLimited);
-        assert!(!pulse_visible(&status, true, now));
-        status.retrying = None;
-        status.reply_unconfirmed = true;
-        assert!(pulse_visible(&status, true, now));
+        assert_eq!(tray_frame(&status, true, now, 0), Frame::Plain);
     }
 }
