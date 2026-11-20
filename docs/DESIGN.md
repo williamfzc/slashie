@@ -24,7 +24,7 @@ Give each host a control handle for status, polling changes, and shutdown. A coo
 
 ### Launch and shutdown
 
-The macOS bundle starts in menu-bar mode. `--headless` selects foreground mode before Tauri initializes. A headless build uses foreground mode by default. `--help` and `--version` exit before opening runtime files. The headless control command `--poll on|off` updates the same persisted polling setting as the menu under the lock, then exits. A headless lock conflict reports an error and exits.
+The macOS bundle starts in menu-bar mode. `--headless` selects foreground mode before Tauri initializes. A headless build uses foreground mode by default. `--help`, `--version`, and the offline `route` subcommands exit before opening runtime files. The headless control command `--poll on|off` updates the same persisted polling setting as the menu under the lock, then exits. A headless lock conflict reports an error and exits.
 
 Menu Quit, Cmd+Q, and SIGINT/SIGTERM request shared shutdown. The menu-bar host exits after the runtime drains. Closing Settings only hides its window and leaves the runtime running. The host holds a user-initiated activity token so App Nap cannot suspend polling while no window is visible; idle system sleep is still allowed. Shutdown stops intake, cancels active Feishu calls, terminates and reaps the active command group, and releases the lock after cleanup. Abandoned claims remain consumed. Canceling a request after Feishu may have accepted it leaves delivery uncertain.
 
@@ -138,5 +138,7 @@ On initial setup, the stock configuration includes `/ping` (replies `pong`), `/p
 | `slashie.log` | Timestamps, IDs, durations, and outcomes. Rotate at 2 MiB and keep one previous log. |
 
 Settings and headless use the same configuration schema and validator. Save atomically and preserve fields the window does not edit. If the file changed since the window loaded it, reject the save and ask the user to reopen Settings. Apply the saved configuration at the next startup.
+
+Manage routes offline through the CLI: `slashie route list` prints the route table as JSON, `slashie route add <PREFIX> --cmd <COMMAND> [--dir <PATH>] [--timeout <SECS>] [--session chat]` adds one route, and `slashie route remove <PREFIX>` removes it. These subcommands run before the instance lock, so they work while the app is running and never trigger the second-instance alert. They reuse the schema and validator, validate the whole file before writing atomically, and refuse to edit an unparsable configuration. This is the interface agents use to configure routes on the user's behalf; the runtime applies the saved file at its next startup.
 
 Keep the runtime directory and files accessible only to the local user. Credentials remain in Lark CLI's credential store.

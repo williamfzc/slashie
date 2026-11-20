@@ -3,6 +3,7 @@
 //! (no default features) is foreground-only (DESIGN.md "Launch and
 //! shutdown", "Desktop build").
 
+mod cli;
 mod config;
 mod lark;
 mod lock;
@@ -45,6 +46,7 @@ fn print_help() {
          \n\
          USAGE:\n\
              slashie [OPTIONS]\n\
+             slashie route <SUBCOMMAND>\n\
          \n\
          OPTIONS:\n\
              --headless        Run the shared runtime in the foreground even in\n\
@@ -54,7 +56,17 @@ fn print_help() {
              --mock <FILE>     Use the mock Feishu transport backed by a JSON\n\
                                fixture instead of the Lark CLI (verification).\n\
              --help            Print this help.\n\
-             --version         Print the version.",
+             --version         Print the version.\n\
+         \n\
+         ROUTE SUBCOMMANDS:\n\
+             Edit config.json routes offline; the running runtime applies\n\
+             them at its next startup. Safe while Slashie is running.\n\
+             route list        Print the route table as JSON.\n\
+             route add <PREFIX> --cmd <COMMAND> [--dir <PATH>]\n\
+                               [--timeout <SECS>] [--session chat]\n\
+                               Add a route.\n\
+             route remove <PREFIX>\n\
+                               Remove a route.",
         VERSION
     );
 }
@@ -121,6 +133,17 @@ fn main() {
                     .next()
                     .unwrap_or_else(|| fail("--mock requires a fixture path"));
                 mock_path = Some(PathBuf::from(v));
+            }
+            // Route edits are offline config-file operations: like --help,
+            // they finish before the instance lock, so they work while the
+            // app is running and can never trigger the second-instance
+            // alert (src/cli.rs, DESIGN.md "Configuration and files").
+            "route" => {
+                match crate::cli::route(&runtime_home(), args) {
+                    Ok(text) => println!("{}", text),
+                    Err(msg) => fail(&msg),
+                }
+                return;
             }
             other => fail(&format!("unknown argument {:?}; try --help", other)),
         }
