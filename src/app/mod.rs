@@ -511,6 +511,11 @@ fn report_settings(state: State<'_, AppState>, message: String) {
 struct StatusPayload {
     polling: bool,
     status_text: Option<&'static str>,
+    /// A scan is in flight right now.
+    scanning: bool,
+    /// Whole seconds since the last complete scan, when one exists.
+    last_scan_age_secs: Option<u64>,
+    poll_interval_secs: u64,
 }
 
 #[tauri::command]
@@ -524,6 +529,11 @@ fn get_status(state: State<'_, AppState>) -> StatusPayload {
     StatusPayload {
         polling,
         status_text: status_line(&status),
+        scanning: status.scanning,
+        last_scan_age_secs: status
+            .last_successful_scan
+            .map(|scan| scan.elapsed().as_secs()),
+        poll_interval_secs: state.rt.config.poll_interval,
     }
 }
 

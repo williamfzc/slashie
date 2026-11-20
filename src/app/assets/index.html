@@ -16,6 +16,7 @@
       --line: #d7d7dc;
       --accent: #005fce;
       --error: #ac211e;
+      --ok: #34a853;
     }
 
     @media (prefers-color-scheme: dark) {
@@ -27,6 +28,7 @@
         --line: #545459;
         --accent: #83b9ff;
         --error: #ff9b91;
+        --ok: #6dd58c;
       }
     }
 
@@ -55,6 +57,31 @@
     }
     :is(button, select, input, textarea):disabled { opacity: .55; }
     .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+    .runtime-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 18px;
+      padding: 10px 12px;
+      color: var(--secondary);
+      font-size: 12px;
+    }
+    #runtime-dot {
+      flex-shrink: 0;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--line);
+    }
+    #runtime-dot.on { background: var(--ok); }
+    #runtime-dot.scanning { animation: breathe 1s ease-in-out infinite; }
+    @keyframes breathe {
+      0%, 100% { opacity: .4; }
+      50% { opacity: 1; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      #runtime-dot.scanning { animation: none; }
+    }
     .interval, .section-heading {
       display: flex;
       align-items: center;
@@ -118,6 +145,12 @@
   <form>
     <main>
       <p id="error" class="error" role="alert"></p>
+      <!-- Read-only runtime status; intentionally not a live region so the
+           one-second refresh stays quiet for screen readers. -->
+      <p id="runtime-status" class="card runtime-status">
+        <span id="runtime-dot" aria-hidden="true"></span>
+        <span id="runtime-text">Checking the poller…</span>
+      </p>
       <fieldset id="editor" aria-label="Configuration" disabled>
         <div class="interval card">
           <label for="interval">Polling interval</label>
@@ -396,6 +429,44 @@
         invalidField?.focus();
       }
     };
+
+    // Runtime status mirrors the menu bar (menu-bar.md). Skipped while the
+    // window is hidden; the page reloads when the window reopens.
+    const runtimeDot = document.getElementById("runtime-dot");
+    const runtimeText = document.getElementById("runtime-text");
+
+    function renderRuntimeStatus(runtime) {
+      if (runtime.status_text) {
+        runtimeDot.classList.remove("on", "scanning");
+        runtimeText.textContent = runtime.status_text;
+      } else if (!runtime.polling) {
+        runtimeDot.classList.remove("on", "scanning");
+        runtimeText.textContent = "Polling is paused.";
+      } else if (runtime.scanning) {
+        runtimeDot.classList.add("on", "scanning");
+        runtimeText.textContent = `Polling every ${runtime.poll_interval_secs}s · scanning…`;
+      } else if (runtime.last_scan_age_secs == null) {
+        runtimeDot.classList.add("on");
+        runtimeDot.classList.remove("scanning");
+        runtimeText.textContent = `Polling every ${runtime.poll_interval_secs}s · waiting for the first scan…`;
+      } else {
+        runtimeDot.classList.add("on");
+        runtimeDot.classList.remove("scanning");
+        runtimeText.textContent = `Polling every ${runtime.poll_interval_secs}s · last scan ${runtime.last_scan_age_secs}s ago`;
+      }
+    }
+
+    async function pollRuntimeStatus() {
+      if (document.hidden || typeof invoke !== "function") return;
+      try {
+        renderRuntimeStatus(await invoke("get_status"));
+      } catch (failure) {
+        runtimeDot.classList.remove("on", "scanning");
+        runtimeText.textContent = `Status unavailable. ${failure.message ?? failure}`;
+      }
+    }
+    setInterval(pollRuntimeStatus, 1000);
+    pollRuntimeStatus();
 
     load();
   </script>

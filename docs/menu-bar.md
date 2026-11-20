@@ -49,10 +49,11 @@ A confirmed later reply clears the reply status. The log retains operational det
 
 ## Settings
 
-Use one window with a single form. The polling switch stays in the menu. The settings window has two editable sections and one secondary diagnostic action. [Apple settings guidance](https://developer.apple.com/design/human-interface-guidelines/settings#macOS)
+Use one window with a single form. The polling switch stays in the menu. The settings window has a read-only runtime status line, two editable sections, and one secondary diagnostic action. [Apple settings guidance](https://developer.apple.com/design/human-interface-guidelines/settings#macOS)
 
 | Area | Controls |
 | --- | --- |
+| Runtime status | A read-only line at the top with a small dot. It mirrors the [menu status](#status-item-and-menu): paused, the copy of any fault or retry, the scan in flight, or the interval and how long ago the last complete scan ran. It refreshes about once a second while the window is visible, and the dot breathes only while a scan is in flight. It is not a live region, so screen readers read it on focus instead of announcing every refresh. Motion respects the system reduced-motion setting. |
 | Polling Interval | One selector with 10, 20, 30, or 60 seconds. The default is 20 seconds. |
 | Routes | An editable list. Each row has a `Prefix`, a `Command`, and a remove action. `Add Route` adds a blank row. |
 | Footer | `Open Log` on the left, `Save` on the right. Disable `Open Log` when the log is unavailable. |
@@ -70,5 +71,6 @@ Save validates the entire draft. Mark invalid fields in place, including blank c
 - Verify the dimmed glyph while polling is paused and the resting dot while it is healthy. Watch a scan in flight and confirm the dot breathes, then flares after the scan completes (including an empty scan) and returns to resting. Verify the plain glyph, without the dot, during startup, scan failure, retry, and shutdown, and confirm the icon and neighboring items stay in place throughout.
 - Verify the frames read at a glance in light and dark appearances and that the dot is visible without relying on color alone.
 - Turn polling off during a command and verify the [pause behavior](product.md#pause-and-recovery). Exercise backoff, failed setting writes, and an uncertain reply. Confirm normal states use the checkmark alone.
+- Open Settings while polling and verify the runtime status line shows the interval and scan age, switches to the breathing dot while a scan runs, and shows the paused copy when polling is off. Verify it carries the status-line copy during a fault, and that the dot does not animate when reduced motion is set.
 - Open Settings twice. Change the interval and add a route, then save and restart. Test both input forms with multiline text. Reject a duplicate prefix and verify that existing route options survive edits. Confirm that the log opens from Settings.
 - Quit during a command and verify cleanup before another instance can start. Launch from Finder while headless holds the lock and verify the startup alert.
