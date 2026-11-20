@@ -107,7 +107,7 @@ A different chat or topic gets a different workspace, so it starts fresh. A fail
 
 ## Configuration and files
 
-Read and validate configuration once at launch. Configure the Lark CLI executable and optional profile. Give both hosts the same subprocess `PATH`. Add the Node directory if the installed Lark CLI is an npm wrapper. [Tauri bundle environment](https://v2.tauri.app/distribute/macos-application-bundle/) · [Lark CLI npm entry point](https://github.com/larksuite/cli/blob/main/package.json)
+Read and validate configuration at launch, and again whenever the file's modification time changes: every scan starts by re-reading `config.json`, so saved edits and CLI route changes apply without a restart. A file that fails to read or validate keeps the previous configuration and logs the reason. Routes and `poll_interval` apply from the next scan; `process_path` applies to commands started afterwards; the Feishu channel binding (`lark_cli`) is built at startup and still requires a restart. Configure the Lark CLI executable and optional profile. Give both hosts the same subprocess `PATH`. Add the Node directory if the installed Lark CLI is an npm wrapper. [Tauri bundle environment](https://v2.tauri.app/distribute/macos-application-bundle/) · [Lark CLI npm entry point](https://github.com/larksuite/cli/blob/main/package.json)
 
 ```json
 {
@@ -131,14 +131,14 @@ On initial setup, the stock configuration includes `/ping` (replies `pong`), `/p
 
 | File | Source of truth |
 | --- | --- |
-| `config.json` | Polling interval, CLI and path settings, and route definitions. Restart after edits. |
+| `config.json` | Polling interval, CLI and path settings, and route definitions. Routes and the interval apply at the next scan; `lark_cli` is read at startup. |
 | `state.json` | Polling setting, identity binding, latest completed scan end, consumed IDs, the channel/chat/topic session mapping, and delivered reply IDs. |
 | `chats/<chat-id>[/<topic-id>]/` | Per-conversation agent workspace for routes with `session: "chat"`. User-only permissions. |
 | `app.lock` | Instance ownership via a held descriptor. |
 | `slashie.log` | Timestamps, IDs, durations, and outcomes. Rotate at 2 MiB and keep one previous log. |
 
-Settings and headless use the same configuration schema and validator. Save atomically and preserve fields the window does not edit. If the file changed since the window loaded it, reject the save and ask the user to reopen Settings. Apply the saved configuration at the next startup.
+Settings and headless use the same configuration schema and validator. Save atomically and preserve fields the window does not edit. If the file changed since the window loaded it, reject the save and ask the user to reopen Settings. The runtime applies the saved configuration at its next scan; only a changed `lark_cli` still requires a restart.
 
-Manage routes offline through the CLI: `slashie route list` prints the route table as JSON, `slashie route add <PREFIX> --cmd <COMMAND> [--dir <PATH>] [--timeout <SECS>] [--session chat]` adds one route, and `slashie route remove <PREFIX>` removes it. These subcommands run before the instance lock, so they work while the app is running and never trigger the second-instance alert. They reuse the schema and validator, validate the whole file before writing atomically, and refuse to edit an unparsable configuration. This is the interface agents use to configure routes on the user's behalf; the runtime applies the saved file at its next startup.
+Manage routes offline through the CLI: `slashie route list` prints the route table as JSON, `slashie route add <PREFIX> --cmd <COMMAND> [--dir <PATH>] [--timeout <SECS>] [--session chat]` adds one route, and `slashie route remove <PREFIX>` removes it. These subcommands run before the instance lock, so they work while the app is running and never trigger the second-instance alert. They reuse the schema and validator, validate the whole file before writing atomically, and refuse to edit an unparsable configuration. This is the interface agents use to configure routes on the user's behalf; the runtime applies the saved file at its next scan.
 
 Keep the runtime directory and files accessible only to the local user. Credentials remain in Lark CLI's credential store.

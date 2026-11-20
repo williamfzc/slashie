@@ -23,7 +23,12 @@ pub struct Job {
 
 pub struct Runtime {
     pub home: PathBuf,
-    pub config: Config,
+    /// Live configuration. Swapped when config.json changes on disk (see
+    /// `maybe_reload_config`); routes and the poll interval apply from the
+    /// next scan on, while the channel binding is still startup-only.
+    pub config: Mutex<Config>,
+    /// mtime of config.json as currently loaded, for change detection.
+    config_mtime: Mutex<Option<std::time::SystemTime>>,
     pub state: Arc<Mutex<State>>,
     pub transport: Arc<dyn Channel>,
     pub identity: String,
@@ -108,8 +113,9 @@ impl Runtime {
         let (job_tx, job_rx) = mpsc::channel::<Option<Job>>();
 
         let runtime = Runtime {
+            config_mtime: Mutex::new(config_mtime(&home)),
             home,
-            config,
+            config: Mutex::new(config),
             state: Arc::new(Mutex::new(state)),
             transport,
             identity,
@@ -237,6 +243,45 @@ impl Runtime {
         self.intake_blocked.lock().unwrap().is_some()
     }
 
+    /// Swap in config.json when it changed on disk (DESIGN.md
+    /// "Configuration and files"): routes and the poll interval apply from
+    /// the next scan, no restart. A file that fails to read or validate
+    /// keeps the previous configuration and logs once per changed version.
+    /// The channel binding (`lark_cli`) is startup-only, so swapping it here
+    /// has no effect until a restart.
+    fn maybe_reload_config(&self) {
+        let mtime = config_mtime(&self.home);
+        {
+            let mut seen = self.config_mtime.lock().unwrap();
+            if mtime == *seen {
+                return;
+            }
+            *seen = mtime;
+        }
+        let text = match std::fs::read_to_string(self.home.join("config.json")) {
+            Ok(text) => text,
+            Err(e) => {
+                self.logger.log(&format!(
+                    "ERROR cannot read config.json: {} (keeping previous configuration)",
+                    e
+                ));
+                return;
+            }
+        };
+        match Config::parse(&text) {
+            Ok(config) => {
+                *self.config.lock().unwrap() = config;
+                self.logger.log("configuration reloaded from config.json");
+            }
+            Err(e) => {
+                self.logger.log(&format!(
+                    "ERROR config.json is invalid: {} (keeping previous configuration)",
+                    e
+                ));
+            }
+        }
+    }
+
     /// One scan with a fixed end time. Admits eligible messages in creation
     /// order (message ID tiebreaker), durably claiming before handoff.
     /// Returns the number of newly claimed messages. `status.scanning`
@@ -249,6 +294,7 @@ impl Runtime {
     }
 
     fn scan_inner(&self) -> Result<usize, String> {
+        self.maybe_reload_config();
         self.status.lock().unwrap().last_successful_scan = None;
         if self.shutdown.load(Ordering::SeqCst) || self.is_intake_blocked() {
             return Ok(0);
@@ -319,6 +365,9 @@ impl Runtime {
             }
         };
 
+        // One consistent snapshot per scan; a mid-scan config swap only
+        // affects the next scan.
+        let routes = self.config.lock().unwrap().routes.clone();
         // The search API can round the requested window to whole seconds.
         let mut eligible: Vec<_> = details
             .into_iter()
@@ -336,7 +385,7 @@ impl Runtime {
             .filter(|m| {
                 let text = m.text.as_ref().unwrap();
                 let first = text.split_whitespace().next().unwrap_or("");
-                self.config.routes.iter().any(|r| r.prefix == first)
+                routes.iter().any(|r| r.prefix == first)
             })
             .collect();
         // Creation order, message ID as tiebreaker.
@@ -346,11 +395,7 @@ impl Runtime {
         for m in eligible {
             let route = {
                 let first = m.text.as_ref().unwrap().split_whitespace().next().unwrap();
-                self.config
-                    .routes
-                    .iter()
-                    .find(|r| r.prefix == first)
-                    .cloned()
+                routes.iter().find(|r| r.prefix == first).cloned()
             };
             let route = match route {
                 Some(r) => r,
@@ -456,11 +501,13 @@ impl Runtime {
         }
         let inputs = build_inputs(&job.route.prefix, &job.message, &key);
         let timeout_secs = job.route.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS);
+        // Commands started after a config swap use the new subprocess path.
+        let process_path = self.config.lock().unwrap().process_path.clone();
         let outcome = run_command_with(
             &job.route,
             &inputs,
             &session,
-            &self.config.process_path,
+            &process_path,
             &home_dir(),
             self.shutdown.clone(),
         );
@@ -549,7 +596,10 @@ impl Runtime {
                 }
             });
 
-            let interval = std::time::Duration::from_secs(self.config.poll_interval.max(1));
+            // Re-read each cycle so a saved interval change applies without
+            // a restart (one scan of latency).
+            let interval =
+                std::time::Duration::from_secs(self.config.lock().unwrap().poll_interval.max(1));
             while !self.shutdown.load(Ordering::SeqCst) {
                 if let Err(e) = self.scan_once() {
                     // Slice note: exponential backoff up to five minutes arrives
@@ -572,6 +622,12 @@ impl Runtime {
         });
         self.logger.log("shutdown complete");
     }
+}
+
+fn config_mtime(home: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(home.join("config.json"))
+        .and_then(|m| m.modified())
+        .ok()
 }
 
 fn ensure_chat_workspace(dir: &Path) -> std::io::Result<()> {
@@ -888,7 +944,7 @@ mod tests {
                 true,
                 false,
             ),
-            route: rt.config.routes[0].clone(),
+            route: rt.config.lock().unwrap().routes[0].clone(),
         };
         rt.process_job(job);
         // Mock reply targeted the original message with stdout.
@@ -924,10 +980,10 @@ mod tests {
         let (rt, mock, home) = init_rt("rejected_reaction", fixture, boundary);
         assert_eq!(rt.scan_once().unwrap(), 1);
         assert!(rt.status.lock().unwrap().last_successful_scan.is_some());
-        rt.process_job(Job {
-            message: m,
-            route: rt.config.routes[0].clone(),
-        });
+        // Bind the route first: a lock guard inside the call argument would
+        // live across process_job and deadlock it.
+        let route = rt.config.lock().unwrap().routes[0].clone();
+        rt.process_job(Job { message: m, route });
         assert_eq!(*mock.reaction_attempts.lock().unwrap(), ["om_reaction"]);
         assert_eq!(mock.reply_records()[0].text, "pong");
         rt.apply_poll_setting(false).unwrap();
@@ -951,7 +1007,7 @@ mod tests {
         };
         let (rt, _, home) =
             init_rt_with_config("chat_session", fixture_with(vec![]), boundary, config);
-        let route = rt.config.routes[0].clone();
+        let route = rt.config.lock().unwrap().routes[0].clone();
         let message = |id: &str, chat: &str| {
             let mut m = mkmsg(
                 id,
@@ -1028,7 +1084,7 @@ mod tests {
         };
         let (rt, mock, home) =
             init_rt_with_config("topic_session", fixture_with(vec![]), boundary, config);
-        let route = rt.config.routes[0].clone();
+        let route = rt.config.lock().unwrap().routes[0].clone();
         let message = |id: &str, topic: Option<&str>| {
             let mut m = mkmsg(
                 id,
@@ -1263,9 +1319,12 @@ mod tests {
             .collect();
         drop(st);
         for id in ids {
+            // Bind the route first: a lock guard inside the call argument
+            // would live across process_job and deadlock it.
+            let route = rt.config.lock().unwrap().routes[0].clone();
             rt.process_job(Job {
                 message: mkmsg(&id, boundary, "ou_self", Some("/ping"), true, false),
-                route: rt.config.routes[0].clone(),
+                route,
             });
         }
         assert_eq!(mock.reply_records().len(), 2);
@@ -1430,6 +1489,7 @@ mod tests {
             f.behavior = behavior;
             let (rt, mock, home) = init_rt("replyfail", f, boundary);
             assert_eq!(rt.scan_once().unwrap(), 1);
+            let route = rt.config.lock().unwrap().routes[0].clone();
             rt.process_job(Job {
                 message: mkmsg(
                     "om_r",
@@ -1439,7 +1499,7 @@ mod tests {
                     true,
                     false,
                 ),
-                route: rt.config.routes[0].clone(),
+                route,
             });
             assert_eq!(mock.reply_records().len(), 0);
             let st = match load_or_init(&home).unwrap() {
@@ -1471,8 +1531,8 @@ mod tests {
         let (rt, mock, home) = init_rt("multiline", fixture_with(msgs), boundary);
         assert_eq!(rt.scan_once().unwrap(), 1);
         // Route echoes its args back with markers.
-        let mut rt = rt;
-        rt.config.routes[0].cmd = "printf '[%s]' \"$SLASHIE_ARGS\"".into();
+        rt.config.lock().unwrap().routes[0].cmd = "printf '[%s]' \"$SLASHIE_ARGS\"".into();
+        let route = rt.config.lock().unwrap().routes[0].clone();
         rt.process_job(Job {
             message: mkmsg(
                 "om_ml",
@@ -1482,7 +1542,7 @@ mod tests {
                 true,
                 false,
             ),
-            route: rt.config.routes[0].clone(),
+            route,
         });
         let recs = mock.reply_records();
         assert_eq!(recs.len(), 1);
@@ -1564,5 +1624,68 @@ mod tests {
         assert!(ReplyError::Rejected("x".into())
             .to_string()
             .contains("rejected"));
+    }
+
+    #[test]
+    fn config_edits_apply_at_the_next_scan_without_restart() {
+        let now = now_ms();
+        let boundary = now - 60_000;
+        let m = mkmsg(
+            "om_late",
+            boundary + 1_000,
+            "ou_self",
+            Some("/late hello"),
+            true,
+            false,
+        );
+        let (rt, _mock, home) = init_rt("hotreload", fixture_with(vec![m]), boundary);
+        // A baseline file, as a real installation has.
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::to_string_pretty(&Config::default()).unwrap(),
+        )
+        .unwrap();
+
+        // /late is not configured yet.
+        assert_eq!(rt.scan_once().unwrap(), 0);
+
+        // An agent (or the CLI) edits the file directly while we run.
+        let mut cfg = Config::default();
+        cfg.routes.push(Route {
+            prefix: "/late".into(),
+            cmd: "echo late".into(),
+            dir: None,
+            timeout: None,
+            session: None,
+        });
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::to_string_pretty(&cfg).unwrap(),
+        )
+        .unwrap();
+
+        // The next scan picks it up without any restart.
+        assert_eq!(rt.scan_once().unwrap(), 1);
+        assert!(rt
+            .config
+            .lock()
+            .unwrap()
+            .routes
+            .iter()
+            .any(|r| r.prefix == "/late"));
+
+        // An invalid edit keeps the previous configuration.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(home.join("config.json"), "{oops").unwrap();
+        assert_eq!(rt.scan_once().unwrap(), 0);
+        assert!(rt
+            .config
+            .lock()
+            .unwrap()
+            .routes
+            .iter()
+            .any(|r| r.prefix == "/late"));
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

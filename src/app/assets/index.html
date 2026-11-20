@@ -202,7 +202,7 @@
           </div>
           <details class="agent-help">
             <summary>Configure with an agent</summary>
-            <p>Any local agent can edit these routes for you with the slashie CLI while Slashie runs. Review its changes, then restart to apply them.</p>
+            <p>Any local agent can edit these routes for you with the slashie CLI while Slashie runs. Review its changes; they apply at the next scan.</p>
             <p>
               <button id="copy-agent-prompt" type="button">Copy agent prompt</button>
               <span id="copy-result" class="copy-result" role="status"></span>
@@ -383,7 +383,7 @@
         "- PREFIX is a unique slash token like /deploy. COMMAND is the shell program; it receives the message text in $SLASHIE_ARGS and $SLASHIE_PROMPT. Quote inputs where the command expects them.",
         "- --session chat keeps one agent session per conversation and cannot combine with --dir.",
         `- Remove a route: \`${cli} route remove <PREFIX>\`.`,
-        "Show me the final route list, remind me to restart Slashie to apply it, and never edit config.json directly.",
+        "Show me the final route list, remind me that changes apply at the next scan, and never edit config.json directly.",
       ].join("\n");
     }
 
@@ -473,7 +473,7 @@
         if (result === "Saved") {
           snapshot = null;
           baseline = JSON.stringify(draft);
-          status.textContent = "Saved. Restart Slashie to apply.";
+          status.textContent = "Saved. Applies at the next scan.";
           try {
             const settings = await readSettings();
             if (JSON.stringify(settings.draft) !== baseline) {

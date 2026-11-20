@@ -23,7 +23,7 @@ Enabling polling covers supported conversations visible to the authorized accoun
 
 ## Controls and faults
 
-Use the [macOS menu](menu-bar.md) to toggle polling, open Settings, and quit. Settings edits the polling interval and route commands. Saved edits take effect after restart, and the diagnostic log is available from Settings. Headless mode runs the same service in the foreground and logs status. Feishu carries command outcomes. The menu and the local log carry operational faults, including when a reply failed or its delivery is uncertain.
+Use the [macOS menu](menu-bar.md) to toggle polling, open Settings, and quit. Settings edits the polling interval and route commands. Saved edits apply at the next scan without a restart, and the diagnostic log is available from Settings. Headless mode runs the same service in the foreground and logs status. Feishu carries command outcomes. The menu and the local log carry operational faults, including when a reply failed or its delivery is uncertain.
 
 ## Pause and recovery
 

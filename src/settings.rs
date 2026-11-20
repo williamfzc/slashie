@@ -5,7 +5,8 @@
 //! pairs. Saving validates the whole draft, preserves per-route working
 //! directories and timeouts, preserves fields the window does not edit
 //! (lark_cli, process_path), and rejects the save when the file changed
-//! since the window loaded it. Saved edits take effect after restart.
+//! since the window loaded it. The runtime picks up the saved file at its
+//! next scan; only the channel binding needs a restart.
 
 use crate::config::{
     atomic_write, route_prefix_problem, validate, Config, Route, ALLOWED_POLL_INTERVALS,
@@ -253,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn save_roundtrip_and_restart_semantics() {
+    fn save_roundtrip_and_next_scan_semantics() {
         let dir = std::env::temp_dir().join(format!("slashie-settings-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -265,7 +266,10 @@ mod tests {
         let d = draft(10, &[("/ping", "echo pong")]);
         assert_eq!(save_settings(&dir, &snapshot, &d), SaveOutcome::Saved);
         let (reloaded, _) = Config::load_or_create(&dir).unwrap();
-        assert_eq!(reloaded.poll_interval, 10, "takes effect after restart");
+        assert_eq!(
+            reloaded.poll_interval, 10,
+            "the saved file is what the next scan loads"
+        );
 
         // Saving against a stale snapshot is rejected.
         let d2 = draft(60, &[("/ping", "echo pong")]);

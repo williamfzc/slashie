@@ -577,7 +577,7 @@ fn get_status(state: State<'_, AppState>) -> StatusPayload {
         last_scan_age_secs: status
             .last_successful_scan
             .map(|scan| scan.elapsed().as_secs()),
-        poll_interval_secs: state.rt.config.poll_interval,
+        poll_interval_secs: state.rt.config.lock().unwrap().poll_interval,
     }
 }
 
