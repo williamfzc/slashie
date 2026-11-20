@@ -205,6 +205,13 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     std::thread::spawn(move || {
         let mut last_text = initial_status;
         let mut last_polling = polling_now;
+        // Exact first pass: the sampling loop below compares against this.
+        let initial_toggleable = {
+            let state: tauri::State<AppState> = app.state();
+            !state.rt.is_intake_blocked()
+        };
+        let mut last_toggleable = initial_toggleable;
+        let _ = polling.set_enabled(initial_toggleable);
         // The builder installed the plain glyph.
         let mut last_frame = Frame::Plain;
         let mut tick: u64 = 0;
@@ -269,6 +276,15 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
                 last_polling = polling_now;
+            }
+            // An unavailable setting must not be toggleable (menu-bar.md):
+            // a blocked intake means the state file cannot be trusted.
+            let toggleable = !state.rt.is_intake_blocked();
+            if toggleable != last_toggleable {
+                if polling.set_enabled(toggleable).is_err() {
+                    return;
+                }
+                last_toggleable = toggleable;
             }
             // Advance the spinner faster than the static sampling cadence.
             std::thread::sleep(if matches!(frame, Frame::Spin(_)) {

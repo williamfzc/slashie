@@ -486,6 +486,12 @@
               throw new Error("The configuration changed after saving.");
             }
             snapshot = settings.snapshot;
+            // The saved file order equals the draft order; re-anchor each
+            // row's identity so later saves in this window session keep
+            // preserving the right route's hidden options.
+            settings.draft.routes.forEach((route, i) => {
+              if (routes.rows[i]) routes.rows[i].dataset.rowId = String(i);
+            });
           } catch (failure) {
             error.textContent = `${failure.message ?? failure} Reopen Settings to continue editing.`;
           }

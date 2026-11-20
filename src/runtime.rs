@@ -227,8 +227,13 @@ impl Runtime {
 
     /// Update the persisted polling setting under the state lock (shared by
     /// the menu toggle, headless `--poll on|off`, and restarts). Returns
-    /// Err when the write failed so the menu can restore its checkmark.
+    /// Err when the write failed or intake is blocked, so the menu can
+    /// restore its checkmark; a blocked intake means the state file is
+    /// untrustworthy and must never be overwritten with defaults.
     pub fn apply_poll_setting(&self, on: bool) -> Result<(), ()> {
+        if self.is_intake_blocked() {
+            return Err(());
+        }
         {
             let mut status = self.status.lock().unwrap();
             let mut st = self.state.lock().unwrap();
@@ -1873,6 +1878,40 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&home);
         let _ = mock;
+    }
+
+    #[test]
+    fn blocked_intake_never_overwrites_the_state_file() {
+        let home = test_home("blockedpoll");
+        std::fs::write(home.join("state.json"), "{not json").unwrap();
+        let corrupt = "{not json".to_string();
+        let mock = Arc::new(MockTransport::new(fixture_with(vec![])));
+        let logger = Arc::new(Logger::new(&home, false));
+        let rt = Runtime::init(
+            home.clone(),
+            LoadedConfig {
+                config: Config::default(),
+                fault: None,
+            },
+            mock,
+            String::new(),
+            Arc::new(AtomicBool::new(false)),
+            logger,
+            None,
+        )
+        .unwrap();
+        assert!(rt.is_intake_blocked());
+        assert_eq!(
+            rt.apply_poll_setting(true),
+            Err(()),
+            "the toggle refuses while the state file is untrustworthy"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("state.json")).unwrap(),
+            corrupt,
+            "the corrupt file is left untouched for the operator to repair"
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
