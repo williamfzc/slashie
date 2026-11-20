@@ -1,7 +1,10 @@
-//! Feishu operations consumed by the runtime and a fixture-backed transport
-//! for verification without live Feishu access.
+//! Channel boundary consumed by the runtime. The Feishu implementation lives
+//! in `lark.rs`; `MockTransport` is the fixture-backed fake used by tests.
+//! A channel owns its wire I/O, its conversation identity, and its workspace
+//! layout, so the runtime never hard-codes Feishu message fields.
 
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// Message details as the runtime sees them after `mget`-style retrieval.
 /// Timestamps are injectable fixture data (millis since the epoch) per the
@@ -14,9 +17,13 @@ pub struct Message {
     pub created_at_ms: i64,
     /// "p2p" or "group" (mock-shaped; the real adapter decodes placement).
     pub chat_type: String,
-    /// Feishu chat ID (`oc_...`). Fixtures may omit it.
+    /// Chat ID (`oc_...` for Feishu). Fixtures may omit it.
     #[serde(default)]
     pub chat_id: String,
+    /// Thread/topic ID (`omt_...`). Present for a topic root or a reply in a
+    /// topic/thread; this is the conversation-isolation key within a chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_id: Option<String>,
     /// Decoded text body for text messages; None for non-text messages.
     pub text: Option<String>,
     /// Validated placement: true when the message is top-level (no root/parent).
@@ -65,7 +72,39 @@ impl std::fmt::Display for ReplyError {
     }
 }
 
-pub trait Transport: Send + Sync {
+/// Stable conversation identity used for session mapping and workspace
+/// layout. A topic/thread is a separate conversation from its parent chat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationKey {
+    pub channel: String,
+    pub chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_id: Option<String>,
+}
+
+/// One messaging channel. Feishu is the current implementation; a future
+/// channel provides its own id, conversation key, workspace layout, and the
+/// same search/detail/reaction/reply operations.
+pub trait Channel: Send + Sync {
+    /// Stable channel id stored with sessions, e.g. "feishu".
+    fn id(&self) -> &'static str;
+
+    /// Conversation identity for a message. Chat is the default scope; a
+    /// topic/thread gets its own key. Channels with a different identity
+    /// model override this.
+    fn conversation_key(&self, msg: &Message) -> ConversationKey {
+        ConversationKey {
+            channel: self.id().to_string(),
+            chat_id: msg.chat_id.clone(),
+            topic_id: msg.topic_id.clone(),
+        }
+    }
+
+    /// Stable workspace for the conversation. The channel decides the layout;
+    /// Feishu keeps the existing `chats/<chat>[/<topic>]` paths so already
+    /// running agent sessions keep their cwd.
+    fn workspace_dir(&self, home: &Path, key: &ConversationKey) -> PathBuf;
+
     /// Search message IDs in [from_ms, to_ms]. Returns IDs only, in the order
     /// the backend provides; ordering and dedup happen in the runtime.
     fn search(&self, from_ms: i64, to_ms: i64) -> Result<Vec<String>, TransportError>;
@@ -76,9 +115,32 @@ pub trait Transport: Send + Sync {
     /// One best-effort processing reaction targeting the claimed message.
     fn react_processing(&self, source_id: &str) -> Result<(), TransportError>;
 
-    /// One reply attempt targeting the source message. Returns the reply ID
-    /// on confirmed success.
-    fn reply(&self, source_id: &str, text: &str) -> Result<String, ReplyError>;
+    /// One reply attempt targeting the source message. `in_thread` keeps the
+    /// reply in the source topic/thread. Returns the reply ID on success.
+    fn reply(&self, source_id: &str, text: &str, in_thread: bool) -> Result<String, ReplyError>;
+}
+
+/// Feishu-compatible workspace layout shared by the real adapter and the
+/// mock: `~/.slashie/chats/<chat>/<topic>`.
+pub fn chat_workspace_dir(home: &Path, key: &ConversationKey) -> PathBuf {
+    let mut dir = home.join("chats").join(safe_component(&key.chat_id));
+    if let Some(topic) = &key.topic_id {
+        dir = dir.join(safe_component(topic));
+    }
+    dir
+}
+
+fn safe_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Records of replies made by the mock, for test assertions.
@@ -87,6 +149,7 @@ pub struct ReplyRecord {
     pub source_id: String,
     pub text: String,
     pub reply_id: String,
+    pub in_thread: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,7 +215,15 @@ impl MockTransport {
     }
 }
 
-impl Transport for MockTransport {
+impl Channel for MockTransport {
+    fn id(&self) -> &'static str {
+        "feishu"
+    }
+
+    fn workspace_dir(&self, home: &Path, key: &ConversationKey) -> PathBuf {
+        chat_workspace_dir(home, key)
+    }
+
     fn search(&self, from_ms: i64, to_ms: i64) -> Result<Vec<String>, TransportError> {
         let left = self.search_failures_left.try_update(
             std::sync::atomic::Ordering::SeqCst,
@@ -210,7 +281,7 @@ impl Transport for MockTransport {
         Ok(())
     }
 
-    fn reply(&self, source_id: &str, text: &str) -> Result<String, ReplyError> {
+    fn reply(&self, source_id: &str, text: &str, in_thread: bool) -> Result<String, ReplyError> {
         if self.fixture.behavior.reply_rejected {
             return Err(ReplyError::Rejected("mock definitive rejection".into()));
         }
@@ -225,6 +296,7 @@ impl Transport for MockTransport {
             source_id: source_id.to_string(),
             text: text.to_string(),
             reply_id: reply_id.clone(),
+            in_thread,
         });
         Ok(reply_id)
     }
@@ -241,6 +313,7 @@ mod tests {
             created_at_ms: ts,
             chat_type: "p2p".into(),
             chat_id: "oc_test".into(),
+            topic_id: None,
             text: Some("/ping".into()),
             top_level: true,
             recalled: false,
@@ -301,22 +374,52 @@ mod tests {
     }
 
     #[test]
+    fn channel_key_and_workspace_isolate_topics() {
+        let t = MockTransport::new(MockFixture {
+            self_open_id: "ou_self".into(),
+            messages: vec![],
+            behavior: Default::default(),
+        });
+        let mut topic_msg = msg("om_topic", 100);
+        topic_msg.topic_id = Some("omt_topic".into());
+        let key = t.conversation_key(&topic_msg);
+        assert_eq!(t.id(), "feishu");
+        assert_eq!(key.channel, "feishu");
+        assert_eq!(key.chat_id, "oc_test");
+        assert_eq!(key.topic_id.as_deref(), Some("omt_topic"));
+        assert_eq!(
+            t.workspace_dir(std::path::Path::new("/tmp/home"), &key),
+            std::path::Path::new("/tmp/home/chats/oc_test/omt_topic")
+        );
+        let plain = t.conversation_key(&msg("om_plain", 100));
+        assert!(plain.topic_id.is_none());
+        assert_eq!(
+            t.workspace_dir(std::path::Path::new("/tmp/home"), &plain),
+            std::path::Path::new("/tmp/home/chats/oc_test")
+        );
+    }
+
+    #[test]
     fn reply_modes() {
         let mut t = MockTransport::new(MockFixture {
             self_open_id: "ou_self".into(),
             messages: vec![],
             behavior: Default::default(),
         });
-        assert_eq!(t.reply("om_1", "pong").unwrap(), "om_reply_1");
+        assert_eq!(t.reply("om_1", "pong", false).unwrap(), "om_reply_1");
         assert_eq!(t.reply_records().len(), 1);
         assert_eq!(t.reply_records()[0].source_id, "om_1");
+        assert!(!t.reply_records()[0].in_thread);
 
         t.fixture.behavior.reply_rejected = true;
-        assert!(matches!(t.reply("om_1", "x"), Err(ReplyError::Rejected(_))));
+        assert!(matches!(
+            t.reply("om_1", "x", false),
+            Err(ReplyError::Rejected(_))
+        ));
         t.fixture.behavior.reply_rejected = false;
         t.fixture.behavior.reply_uncertain = true;
         assert!(matches!(
-            t.reply("om_1", "x"),
+            t.reply("om_1", "x", false),
             Err(ReplyError::Uncertain(_))
         ));
         // Uncertain attempts are not recorded as sent.

@@ -17,7 +17,9 @@
 
 use crate::config::LarkCli;
 use crate::logging::{rfc3339_secs_ceil, rfc3339_secs_floor};
-use crate::transport::{Message, ReplyError, Transport, TransportError};
+use crate::transport::{
+    chat_workspace_dir, Channel, ConversationKey, Message, ReplyError, TransportError,
+};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -423,12 +425,18 @@ fn parse_item(item: &Value) -> Result<Message, String> {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let topic_id = item
+        .get("thread_id")
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
     Ok(Message {
         id,
         sender,
         created_at_ms: create_time,
         chat_type,
         chat_id,
+        topic_id,
         text,
         top_level: root.is_empty() && parent.is_empty(),
         recalled: item
@@ -439,7 +447,15 @@ fn parse_item(item: &Value) -> Result<Message, String> {
     })
 }
 
-impl Transport for LarkCliTransport {
+impl Channel for LarkCliTransport {
+    fn id(&self) -> &'static str {
+        "feishu"
+    }
+
+    fn workspace_dir(&self, home: &Path, key: &ConversationKey) -> PathBuf {
+        chat_workspace_dir(home, key)
+    }
+
     fn search(&self, from_ms: i64, to_ms: i64) -> Result<Vec<String>, TransportError> {
         let self_id = {
             // from_ids requires the bound open_id; the runtime only scans
@@ -598,9 +614,9 @@ impl Transport for LarkCliTransport {
         api_data(&envelope).map(|_| ())
     }
 
-    fn reply(&self, source_id: &str, text: &str) -> Result<String, ReplyError> {
+    fn reply(&self, source_id: &str, text: &str, in_thread: bool) -> Result<String, ReplyError> {
         let idempotency_key = format!("slashie-{}", source_id);
-        let args = vec![
+        let mut args = vec![
             "im".to_string(),
             "+messages-reply".to_string(),
             "--message-id".to_string(),
@@ -612,6 +628,9 @@ impl Transport for LarkCliTransport {
             "--idempotency-key".to_string(),
             idempotency_key,
         ];
+        if in_thread {
+            args.push("--reply-in-thread".to_string());
+        }
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         match self.run(&arg_refs, None, self.timeout_ms) {
             Ok(out) => {
@@ -776,6 +795,7 @@ if args[:3] == ["api", "GET", "/open-apis/im/v1/messages/mget"]:
             item["recalled"] = True
         elif mid == "om_reply_msg":
             item["root_id"] = "om_root"
+            item["thread_id"] = "omt_thread"
         elif mid == "om_img":
             item["msg_type"] = "image"
             item["body"]["content"] = "{}"
@@ -796,6 +816,8 @@ if args[:3] == ["im", "reactions", "create"]:
 
 if args[:1] == ["im"] and "+messages-reply" in args:
     mid = args[args.index("--message-id") + 1]
+    if mid == "om_thread_src":
+        assert "--reply-in-thread" in args
     if mid == "om_hang":
         time.sleep(60)
     if mid == "om_exitfail":
@@ -949,6 +971,11 @@ sys.exit(0)
         assert_eq!(by_id["om_bot"].sender, "ou_bot");
         assert_eq!(by_id["om_ok"].created_at_ms, 1_795_096_700_000);
         assert_eq!(by_id["om_ok"].chat_id, "oc_chat");
+        assert_eq!(by_id["om_ok"].topic_id, None);
+        assert_eq!(
+            by_id["om_reply_msg"].topic_id.as_deref(),
+            Some("omt_thread")
+        );
 
         assert!(matches!(
             t.mget(&["om_missing".to_string()]),
@@ -958,27 +985,38 @@ sys.exit(0)
     }
 
     #[test]
+    fn reply_in_thread_passes_the_flag() {
+        let dir = tmp("reply_thread");
+        let t = transport_in(&dir, "test");
+        assert_eq!(
+            t.reply("om_thread_src", "pong", true).unwrap(),
+            "om_reply_new"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn reply_outcomes_sent_rejected_and_uncertain() {
         let dir = tmp("reply");
         let t = transport_in(&dir, "test");
-        assert_eq!(t.reply("om_src", "pong").unwrap(), "om_reply_new");
+        assert_eq!(t.reply("om_src", "pong", false).unwrap(), "om_reply_new");
         assert!(matches!(
-            t.reply("om_reject", "pong"),
+            t.reply("om_reject", "pong", false),
             Err(ReplyError::Rejected(_))
         ));
         assert!(matches!(
-            t.reply("om_exitfail", "pong"),
+            t.reply("om_exitfail", "pong", false),
             Err(ReplyError::Uncertain(_))
         ));
         // Live-verified: nonzero exit + definitive envelope = Rejected.
         assert!(matches!(
-            t.reply("om_scopedeny", "pong"),
+            t.reply("om_scopedeny", "pong", false),
             Err(ReplyError::Rejected(m)) if m.contains("scope")
         ));
         let t = t.with_timeout_ms(500);
         let started = std::time::Instant::now();
         assert!(matches!(
-            t.reply("om_hang", "pong"),
+            t.reply("om_hang", "pong", false),
             Err(ReplyError::Uncertain(_))
         ));
         // The bounded deadline applies even to a hung CLI.

@@ -6,7 +6,7 @@
 use crate::config::{Config, Route, DEFAULT_TIMEOUT_SECS};
 use crate::logging::{now_ms, Logger};
 use crate::state::{load_or_init, save, ClaimStatus, State, StateLoad};
-use crate::transport::{Transport, TransportError};
+use crate::transport::{Channel, TransportError};
 use crate::worker::{build_inputs, run_command_with, SessionEnv};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,7 +25,7 @@ pub struct Runtime {
     pub home: PathBuf,
     pub config: Config,
     pub state: Arc<Mutex<State>>,
-    pub transport: Arc<dyn Transport>,
+    pub transport: Arc<dyn Channel>,
     pub identity: String,
     pub logger: Arc<Logger>,
     pub shutdown: Arc<AtomicBool>,
@@ -74,7 +74,7 @@ impl Runtime {
     pub fn init(
         home: PathBuf,
         loaded: LoadedConfig,
-        transport: Arc<dyn Transport>,
+        transport: Arc<dyn Channel>,
         identity: String,
         shutdown: Arc<AtomicBool>,
         logger: Arc<Logger>,
@@ -173,7 +173,7 @@ impl Runtime {
             .map(|c| c.message_id.clone())
             .collect();
         for id in &pending {
-            st.settle_claim(id, now, "interrupted_on_restart");
+            st.settle_claim(id, now, "interrupted_on_restart", None);
             self.logger
                 .log(&format!("claim {} interrupted on restart", id));
         }
@@ -292,7 +292,7 @@ impl Runtime {
             let st = self.state.lock().unwrap();
             let mut unique = Vec::new();
             for id in ids {
-                if !st.is_consumed(&id) && !unique.contains(&id) {
+                if !st.is_consumed(&id) && !st.is_own_reply(&id) && !unique.contains(&id) {
                     unique.push(id);
                 }
             }
@@ -317,7 +317,9 @@ impl Runtime {
             .filter(|m| {
                 m.sender == self.identity
                     && !m.recalled
-                    && m.top_level
+                    // A topic root or a reply in a topic is allowed; an
+                    // ordinary reply thread is still excluded.
+                    && (m.top_level || m.topic_id.is_some())
                     && m.text.is_some()
                     && m.created_at_ms > boundary
                     && m.created_at_ms >= start
@@ -413,25 +415,28 @@ impl Runtime {
                 ));
             }
         }
+        let key = self.transport.conversation_key(&job.message);
         let mut session = SessionEnv {
-            chat_id: job.message.chat_id.clone(),
+            channel: key.channel.clone(),
+            chat_id: key.chat_id.clone(),
+            topic_id: key.topic_id.clone().unwrap_or_default(),
             ..SessionEnv::default()
         };
         if job.route.session.as_deref() == Some("chat") {
-            if session.chat_id.is_empty() {
+            if key.chat_id.is_empty() {
                 self.logger.log(&format!(
                     "session chat requested for {} but the message has no chat id",
                     job.message.id
                 ));
             } else {
-                let dir = chat_workspace(&self.home, &session.chat_id);
+                let dir = self.transport.workspace_dir(&self.home, &key);
                 match ensure_chat_workspace(&dir) {
                     Ok(()) => {
                         session.continuing = self
                             .state
                             .lock()
                             .unwrap()
-                            .has_chat_session(&session.chat_id, &job.route.prefix);
+                            .has_chat_session(&key, &job.route.prefix);
                         session.dir = Some(dir);
                     }
                     Err(e) => self.logger.log(&format!(
@@ -441,7 +446,7 @@ impl Runtime {
                 }
             }
         }
-        let inputs = build_inputs(&job.route.prefix, &job.message);
+        let inputs = build_inputs(&job.route.prefix, &job.message, &key);
         let timeout_secs = job.route.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS);
         let outcome = run_command_with(
             &job.route,
@@ -457,7 +462,10 @@ impl Runtime {
         ));
 
         // Exactly one reply attempt targeting the original message.
-        let reply_result = self.transport.reply(&job.message.id, &outcome.reply_text);
+        let reply_result =
+            self.transport
+                .reply(&job.message.id, &outcome.reply_text, key.topic_id.is_some());
+        let mut delivered_reply_id: Option<String> = None;
         let reply_state = match reply_result {
             Ok(reply_id) => {
                 self.logger.log(&format!(
@@ -468,6 +476,7 @@ impl Runtime {
                 let mut status = self.status.lock().unwrap();
                 status.reply_failed = false;
                 status.reply_unconfirmed = false;
+                delivered_reply_id = Some(reply_id);
                 "reply_sent".to_string()
             }
             Err(crate::transport::ReplyError::Rejected(m)) => {
@@ -491,12 +500,17 @@ impl Runtime {
         let outcome_code = format!("{}:{}", outcome.termination, reply_state);
         {
             let mut st = self.state.lock().unwrap();
-            // A successful run leaves a resumable agent session in the chat
-            // workspace; remember it before the durable settle.
+            // A successful run leaves a resumable agent session in the
+            // conversation workspace; remember it before the durable settle.
             if session.dir.is_some() && outcome.exit_code == Some(0) {
-                st.record_chat_session(&session.chat_id, &job.route.prefix, now_ms());
+                st.record_chat_session(&key, &job.route.prefix, now_ms());
             }
-            st.settle_claim(&job.message.id, now_ms(), &outcome_code);
+            st.settle_claim(
+                &job.message.id,
+                now_ms(),
+                &outcome_code,
+                delivered_reply_id.as_deref(),
+            );
             if let Err(e) = save(&self.home, &st) {
                 self.logger.log(&format!(
                     "ERROR cannot persist settle for {}: {}",
@@ -552,23 +566,6 @@ impl Runtime {
     }
 }
 
-/// Stable per-chat workspace used when a route opts into `session: "chat"`.
-/// Feishu chat IDs are `oc_*`; sanitize defensively so the path stays inside
-/// the runtime directory.
-fn chat_workspace(home: &Path, chat_id: &str) -> PathBuf {
-    let key: String = chat_id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    home.join("chats").join(key)
-}
-
 fn ensure_chat_workspace(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
@@ -587,7 +584,9 @@ fn home_dir() -> String {
 mod tests {
     use super::*;
     use crate::logging::Logger;
-    use crate::transport::{Message, MockBehavior, MockFixture, MockTransport, ReplyError};
+    use crate::transport::{
+        ConversationKey, Message, MockBehavior, MockFixture, MockTransport, ReplyError,
+    };
     use std::sync::atomic::AtomicBool;
 
     fn mkmsg(
@@ -604,6 +603,7 @@ mod tests {
             created_at_ms: ts,
             chat_type: "p2p".into(),
             chat_id: "oc_test".into(),
+            topic_id: None,
             text: text.map(|s| s.into()),
             top_level,
             recalled,
@@ -957,7 +957,18 @@ mod tests {
             m
         };
         let read = |chat: &str| {
-            std::fs::read_to_string(chat_workspace(&home, chat).join("state")).unwrap()
+            std::fs::read_to_string(
+                crate::transport::chat_workspace_dir(
+                    &home,
+                    &ConversationKey {
+                        channel: "feishu".into(),
+                        chat_id: chat.into(),
+                        topic_id: None,
+                    },
+                )
+                .join("state"),
+            )
+            .unwrap()
         };
 
         rt.process_job(Job {
@@ -977,14 +988,180 @@ mod tests {
         assert_eq!(read("oc_two"), "0|oc_two");
 
         let st = rt.state.lock().unwrap();
-        assert!(st.has_chat_session("oc_one", "/claude"));
-        assert!(st.has_chat_session("oc_two", "/claude"));
+        let key = |chat: &str| ConversationKey {
+            channel: "feishu".into(),
+            chat_id: chat.into(),
+            topic_id: None,
+        };
+        assert!(st.has_chat_session(&key("oc_one"), "/claude"));
+        assert!(st.has_chat_session(&key("oc_two"), "/claude"));
         let on_disk = match load_or_init(&home).unwrap() {
             StateLoad::Loaded(s) => s,
             StateLoad::Created(_) => panic!("state should exist"),
         };
         assert_eq!(on_disk.chat_sessions.len(), 2);
         drop(st);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn topic_reply_maps_to_its_own_session_and_thread_reply() {
+        let now = now_ms();
+        let boundary = now - 60_000;
+        let config = Config {
+            routes: vec![Route {
+                prefix: "/topictest".into(),
+                cmd: "printf '%s|%s|%s|%s|%s' \"$SLASHIE_CHANNEL\" \"$SLASHIE_CHAT\" \"$SLASHIE_TOPIC\" \"$SLASHIE_CONTINUE\" \"$(basename \"$PWD\")\" > \"$SLASHIE_SESSION_DIR/state\"".into(),
+                dir: None,
+                timeout: Some(10),
+                session: Some("chat".into()),
+            }],
+            ..Config::default()
+        };
+        let (rt, mock, home) =
+            init_rt_with_config("topic_session", fixture_with(vec![]), boundary, config);
+        let route = rt.config.routes[0].clone();
+        let message = |id: &str, topic: Option<&str>| {
+            let mut m = mkmsg(
+                id,
+                now - 1000,
+                "ou_self",
+                Some("/topictest hi"),
+                false,
+                false,
+            );
+            m.chat_id = "oc_chat".into();
+            m.topic_id = topic.map(|t| t.to_string());
+            m
+        };
+        let read = |topic: &str| {
+            std::fs::read_to_string(
+                crate::transport::chat_workspace_dir(
+                    &home,
+                    &ConversationKey {
+                        channel: "feishu".into(),
+                        chat_id: "oc_chat".into(),
+                        topic_id: Some(topic.into()),
+                    },
+                )
+                .join("state"),
+            )
+            .unwrap()
+        };
+
+        rt.process_job(Job {
+            message: message("om_topic_a1", Some("omt_a")),
+            route: route.clone(),
+        });
+        assert_eq!(read("omt_a"), "feishu|oc_chat|omt_a|0|omt_a");
+        rt.process_job(Job {
+            message: message("om_topic_a2", Some("omt_a")),
+            route: route.clone(),
+        });
+        assert_eq!(read("omt_a"), "feishu|oc_chat|omt_a|1|omt_a");
+        rt.process_job(Job {
+            message: message("om_topic_b1", Some("omt_b")),
+            route: route.clone(),
+        });
+        assert_eq!(read("omt_b"), "feishu|oc_chat|omt_b|0|omt_b");
+
+        // A topic reply is posted into the same thread.
+        assert!(mock.reply_records().iter().all(|r| r.in_thread));
+        let st = rt.state.lock().unwrap();
+        assert!(st.has_chat_session(
+            &ConversationKey {
+                channel: "feishu".into(),
+                chat_id: "oc_chat".into(),
+                topic_id: Some("omt_a".into()),
+            },
+            "/topictest"
+        ));
+        assert_ne!(
+            crate::transport::chat_workspace_dir(
+                &home,
+                &ConversationKey {
+                    channel: "feishu".into(),
+                    chat_id: "oc_chat".into(),
+                    topic_id: Some("omt_a".into()),
+                }
+            ),
+            crate::transport::chat_workspace_dir(
+                &home,
+                &ConversationKey {
+                    channel: "feishu".into(),
+                    chat_id: "oc_chat".into(),
+                    topic_id: Some("omt_b".into()),
+                }
+            )
+        );
+        drop(st);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn topic_replies_are_admitted_but_plain_replies_are_not() {
+        let now = now_ms();
+        let boundary = now - 60_000;
+        let mut root = mkmsg(
+            "om_topic_root",
+            boundary + 1000,
+            "ou_self",
+            Some("/ping"),
+            true,
+            false,
+        );
+        root.topic_id = Some("omt_a".into());
+        let mut reply = mkmsg(
+            "om_topic_reply",
+            boundary + 2000,
+            "ou_self",
+            Some("/ping"),
+            false,
+            false,
+        );
+        reply.topic_id = Some("omt_a".into());
+        let plain = mkmsg(
+            "om_plain_reply",
+            boundary + 3000,
+            "ou_self",
+            Some("/ping"),
+            false,
+            false,
+        );
+        let (rt, _, home) = init_rt(
+            "topic_admission",
+            fixture_with(vec![root, reply, plain]),
+            boundary,
+        );
+        assert_eq!(rt.scan_once().unwrap(), 2);
+        let st = rt.state.lock().unwrap();
+        assert!(st.is_consumed("om_topic_root"));
+        assert!(st.is_consumed("om_topic_reply"));
+        assert!(!st.is_consumed("om_plain_reply"));
+        drop(st);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn own_reply_id_is_never_admitted_again() {
+        let now = now_ms();
+        let boundary = now - 60_000;
+        let msg = mkmsg(
+            "om_own_reply",
+            boundary + 1000,
+            "ou_self",
+            Some("/ping"),
+            true,
+            false,
+        );
+        let (rt, _, home) = init_rt("own_reply", fixture_with(vec![msg]), boundary);
+        {
+            let mut st = rt.state.lock().unwrap();
+            st.add_claim("om_source", now);
+            st.settle_claim("om_source", now, "exit:reply_sent", Some("om_own_reply"));
+        }
+        assert_eq!(rt.scan_once().unwrap(), 0);
+        assert!(!rt.state.lock().unwrap().is_consumed("om_own_reply"));
         let _ = std::fs::remove_dir_all(&home);
     }
 

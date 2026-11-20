@@ -161,7 +161,7 @@
         <summary>Command variables</summary>
         <p><code>"$SLASHIE_ARGS"</code> passes the text after the prefix. <code>"$SLASHIE_PROMPT"</code> includes that text and the message source.</p>
         <p>For example, use <code>codex exec "$SLASHIE_PROMPT"</code>. A fixed command like <code>echo pong</code> needs no input.</p>
-        <p>A route with <code>"session": "chat"</code> in config.json keeps one agent session per Feishu chat and passes <code>$SLASHIE_CONTINUE</code>.</p>
+        <p>A route with <code>"session": "chat"</code> in config.json keeps one agent session per conversation (chat or topic) and passes <code>$SLASHIE_CONTINUE</code>.</p>
       </details>
     </main>
 

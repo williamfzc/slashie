@@ -51,7 +51,7 @@ Use one window with a single form. The polling switch stays in the menu. The set
 
 Below Routes, show the two supported input forms: `"$SLASHIE_ARGS"` passes the text after the slash command, and `"$SLASHIE_PROMPT"` passes that text plus the message source. For example, `codex exec "$SLASHIE_PROMPT"`. The operator composes a command in the Command field and supplies the quoted input where the CLI expects it. A fixed command such as `echo pong` needs no input.
 
-A route may set `"session": "chat"` in the configuration file to keep one agent session per Feishu chat. The window preserves that option when it edits the route; the command uses `SLASHIE_CONTINUE` to choose between starting and resuming.
+A route may set `"session": "chat"` in the configuration file to keep one agent session per conversation (chat or topic). The window preserves that option when it edits the route; the command uses `SLASHIE_CONTINUE` to choose between starting and resuming.
 
 Save validates the entire draft. Mark invalid fields in place, including blank commands and duplicate prefixes. If the configuration file cannot be parsed, show its path and disable Save until the file is repaired. On success, keep the window open and show `Saved. Restart Slashie to apply.` Closing the window leaves saved settings intact and discards unsaved edits. Preserve per-route working directories and timeouts when editing existing rows. Lark CLI and subprocess path options stay in the [shared configuration file](DESIGN.md#configuration-and-files).
 

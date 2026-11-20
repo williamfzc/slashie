@@ -6,7 +6,7 @@
 //! process group; timeouts and shutdown terminate then kill the group.
 
 use crate::config::Route;
-use crate::transport::Message;
+use crate::transport::{ConversationKey, Message};
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,15 +36,19 @@ pub struct CommandInputs {
     pub link: String,
 }
 
-pub fn build_inputs(route_prefix: &str, msg: &Message) -> CommandInputs {
+pub fn build_inputs(route_prefix: &str, msg: &Message, key: &ConversationKey) -> CommandInputs {
     let text = msg.text.clone().unwrap_or_default();
     let args = text
         .split_once(route_prefix)
         .map(|(_, rest)| rest.to_string())
         .unwrap_or_default();
     let mut source = format!("message: {}", msg.id);
+    source.push_str(&format!("\nchannel: {}", key.channel));
     if !msg.chat_id.is_empty() {
         source.push_str(&format!("\nchat: {} ({})", msg.chat_id, msg.chat_type));
+    }
+    if let Some(topic) = &key.topic_id {
+        source.push_str(&format!("\ntopic: {}", topic));
     }
     if let Some(link) = &msg.link {
         source.push_str(&format!("\nlink: {}", link));
@@ -65,7 +69,9 @@ pub fn build_inputs(route_prefix: &str, msg: &Message) -> CommandInputs {
 /// already completed a command and may resume its agent session.
 #[derive(Debug, Clone, Default)]
 pub struct SessionEnv {
+    pub channel: String,
     pub chat_id: String,
+    pub topic_id: String,
     pub dir: Option<std::path::PathBuf>,
     pub continuing: bool,
 }
@@ -162,7 +168,9 @@ pub fn run_command_with(
     cmd.env("SLASHIE_ID", &inputs.id);
     cmd.env("SLASHIE_LINK", &inputs.link);
     cmd.env("SLASHIE_CONTEXT", &inputs.source);
+    cmd.env("SLASHIE_CHANNEL", &session.channel);
     cmd.env("SLASHIE_CHAT", &session.chat_id);
+    cmd.env("SLASHIE_TOPIC", &session.topic_id);
     cmd.env(
         "SLASHIE_CONTINUE",
         if session.continuing { "1" } else { "0" },
@@ -357,16 +365,24 @@ mod tests {
             created_at_ms: 0,
             chat_type: "p2p".into(),
             chat_id: "oc_test".into(),
+            topic_id: None,
             text: Some("/t line1\nline2\nline3".into()),
             top_level: true,
             recalled: false,
             link: Some("https://example.example/msg".into()),
         };
-        let inputs = build_inputs("/t", &msg);
+        let key = ConversationKey {
+            channel: "feishu".into(),
+            chat_id: "oc_test".into(),
+            topic_id: Some("omt_test".into()),
+        };
+        let inputs = build_inputs("/t", &msg, &key);
         assert_eq!(inputs.args, " line1\nline2\nline3");
         assert!(inputs.prompt.starts_with(" line1\nline2\nline3\n\n"));
         assert!(inputs.source.contains("message: om_1"));
+        assert!(inputs.source.contains("channel: feishu"));
         assert!(inputs.source.contains("chat: oc_test (p2p)"));
+        assert!(inputs.source.contains("topic: omt_test"));
         assert!(inputs.source.contains("link: https://example.example/msg"));
         assert!(inputs.source.contains("sender: ou_self"));
         assert_eq!(inputs.id, "om_1");
@@ -403,7 +419,9 @@ mod tests {
         let run = |prefix: &str, continuing: bool| {
             let route = cfg.routes.iter().find(|r| r.prefix == prefix).unwrap();
             let session = SessionEnv {
+                channel: "feishu".into(),
                 chat_id: "oc_chat".into(),
+                topic_id: String::new(),
                 dir: None,
                 continuing,
             };
@@ -453,7 +471,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let session = SessionEnv {
+            channel: "feishu".into(),
             chat_id: "oc_chat".into(),
+            topic_id: "omt_topic".into(),
             dir: Some(dir.clone()),
             continuing: true,
         };
@@ -467,7 +487,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let out = run_command_with(
             &route(
-                "printf '%s|%s|%s|%s|%s|%s|%s' \"$SLASHIE_CONTINUE\" \"$SLASHIE_CHAT\" \"$SLASHIE_CONTEXT\" \"$SLASHIE_ID\" \"$SLASHIE_LINK\" \"$SLASHIE_SESSION_DIR\" \"$(basename \"$PWD\")\"",
+                "printf '%s|%s|%s|%s|%s|%s|%s|%s|%s' \"$SLASHIE_CHANNEL\" \"$SLASHIE_CHAT\" \"$SLASHIE_TOPIC\" \"$SLASHIE_CONTINUE\" \"$SLASHIE_CONTEXT\" \"$SLASHIE_ID\" \"$SLASHIE_LINK\" \"$SLASHIE_SESSION_DIR\" \"$(basename \"$PWD\")\"",
             ),
             &inputs,
             &session,
@@ -478,7 +498,7 @@ mod tests {
         assert_eq!(
             out.reply_text,
             format!(
-                "1|oc_chat|message: om_1|om_1|https://example.example/msg|{}|{}",
+                "feishu|oc_chat|omt_topic|1|message: om_1|om_1|https://example.example/msg|{}|{}",
                 dir.display(),
                 dir.file_name().unwrap().to_string_lossy()
             )

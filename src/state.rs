@@ -6,6 +6,7 @@
 //! opted into `session: "chat"`. Updates are serialized by the runtime coordinator and persisted
 //! atomically with a synced file and directory.
 
+use crate::transport::ConversationKey;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -28,6 +29,10 @@ pub struct Claim {
     /// What happened: e.g. "ran:reply_sent", "interrupted_on_restart".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    /// Reply message ID returned by a confirmed send. It must never be
+    /// admitted as a new command, including in a topic/thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_id: Option<String>,
 }
 
 /// One chat route that already has a local agent session. The workspace is
@@ -35,7 +40,11 @@ pub struct Claim {
 /// may resume the session (`SLASHIE_CONTINUE=1`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatSession {
+    #[serde(default = "default_channel")]
+    pub channel: String,
     pub chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_id: Option<String>,
     pub prefix: String,
     pub last_success_ms: i64,
 }
@@ -55,6 +64,10 @@ pub struct State {
     pub claims: Vec<Claim>,
     #[serde(default)]
     pub chat_sessions: Vec<ChatSession>,
+}
+
+fn default_channel() -> String {
+    "feishu".into()
 }
 
 fn default_paused() -> bool {
@@ -102,18 +115,23 @@ pub fn load_or_init(home: &Path) -> Result<StateLoad, StateError> {
                 }
                 seen.push(&c.message_id);
             }
-            let mut seen_sessions: Vec<(&str, &str)> = Vec::new();
+            let mut seen_sessions: Vec<(&str, &str, Option<&str>, &str)> = Vec::new();
             for session in &st.chat_sessions {
                 if session.last_success_ms < 0 {
                     return Err(StateError(
                         "chat session last_success_ms must be nonnegative".into(),
                     ));
                 }
-                let key = (session.chat_id.as_str(), session.prefix.as_str());
+                let key = (
+                    session.channel.as_str(),
+                    session.chat_id.as_str(),
+                    session.topic_id.as_deref(),
+                    session.prefix.as_str(),
+                );
                 if seen_sessions.contains(&key) {
                     return Err(StateError(format!(
-                        "duplicate chat session for {} {}",
-                        session.chat_id, session.prefix
+                        "duplicate chat session for {} {} {}",
+                        session.channel, session.chat_id, session.prefix
                     )));
                 }
                 seen_sessions.push(key);
@@ -163,10 +181,17 @@ impl State {
             claimed_at_ms: now_ms,
             settled_at_ms: None,
             outcome: None,
+            reply_id: None,
         });
     }
 
-    pub fn settle_claim(&mut self, message_id: &str, now_ms: i64, outcome: &str) {
+    pub fn settle_claim(
+        &mut self,
+        message_id: &str,
+        now_ms: i64,
+        outcome: &str,
+        reply_id: Option<&str>,
+    ) {
         if let Some(c) = self
             .claims
             .iter_mut()
@@ -175,7 +200,17 @@ impl State {
             c.status = ClaimStatus::Settled;
             c.settled_at_ms = Some(now_ms);
             c.outcome = Some(outcome.to_string());
+            c.reply_id = reply_id.map(|id| id.to_string());
         }
+    }
+
+    /// True when `message_id` is a reply Slashie already delivered. Such a
+    /// message can appear in search results (especially inside a topic) and
+    /// must never be treated as a new command.
+    pub fn is_own_reply(&self, message_id: &str) -> bool {
+        self.claims
+            .iter()
+            .any(|c| c.reply_id.as_deref() == Some(message_id))
     }
 
     /// Record the latest completed scan end; it must never decrease.
@@ -185,28 +220,37 @@ impl State {
         }
     }
 
-    /// True when this chat route has completed a command successfully and may
-    /// resume its agent session.
-    pub fn has_chat_session(&self, chat_id: &str, prefix: &str) -> bool {
-        self.chat_sessions
-            .iter()
-            .any(|s| s.chat_id == chat_id && s.prefix == prefix)
+    fn session_matches(session: &ChatSession, key: &ConversationKey, prefix: &str) -> bool {
+        session.channel == key.channel
+            && session.chat_id == key.chat_id
+            && session.topic_id == key.topic_id
+            && session.prefix == prefix
     }
 
-    /// Remember that the chat route now has a session. The timestamp only
-    /// moves forward.
-    pub fn record_chat_session(&mut self, chat_id: &str, prefix: &str, now_ms: i64) {
+    /// True when this conversation route has completed a command successfully
+    /// and may resume its agent session.
+    pub fn has_chat_session(&self, key: &ConversationKey, prefix: &str) -> bool {
+        self.chat_sessions
+            .iter()
+            .any(|s| Self::session_matches(s, key, prefix))
+    }
+
+    /// Remember that the conversation route now has a session. The timestamp
+    /// only moves forward.
+    pub fn record_chat_session(&mut self, key: &ConversationKey, prefix: &str, now_ms: i64) {
         if let Some(session) = self
             .chat_sessions
             .iter_mut()
-            .find(|s| s.chat_id == chat_id && s.prefix == prefix)
+            .find(|s| Self::session_matches(s, key, prefix))
         {
             if now_ms > session.last_success_ms {
                 session.last_success_ms = now_ms;
             }
         } else {
             self.chat_sessions.push(ChatSession {
-                chat_id: chat_id.to_string(),
+                channel: key.channel.clone(),
+                chat_id: key.chat_id.clone(),
+                topic_id: key.topic_id.clone(),
                 prefix: prefix.to_string(),
                 last_success_ms: now_ms,
             });
@@ -232,11 +276,15 @@ mod tests {
         st.add_claim("om_1", 100);
         assert!(st.is_consumed("om_1"));
         assert_eq!(st.waiting_count(), 1);
-        st.settle_claim("om_1", 200, "ran:reply_sent");
+        st.settle_claim("om_1", 200, "ran:reply_sent", Some("om_reply_1"));
         assert_eq!(st.claims[0].status, ClaimStatus::Settled);
         assert_eq!(st.claims[0].outcome.as_deref(), Some("ran:reply_sent"));
-        st.settle_claim("om_1", 300, "again"); // no-op, already settled
+        assert_eq!(st.claims[0].reply_id.as_deref(), Some("om_reply_1"));
+        assert!(st.is_own_reply("om_reply_1"));
+        assert!(!st.is_own_reply("om_1"));
+        st.settle_claim("om_1", 300, "again", None); // no-op, already settled
         assert_eq!(st.claims[0].settled_at_ms, Some(200));
+        assert_eq!(st.claims[0].reply_id.as_deref(), Some("om_reply_1"));
     }
 
     #[test]
@@ -251,18 +299,36 @@ mod tests {
     #[test]
     fn chat_session_mapping_roundtrip() {
         let mut st = State::default();
-        assert!(!st.has_chat_session("oc_a", "/claude"));
-        st.record_chat_session("oc_a", "/claude", 100);
-        st.record_chat_session("oc_a", "/claude", 50); // never decreases
-        st.record_chat_session("oc_a", "/codex", 200);
-        assert!(st.has_chat_session("oc_a", "/claude"));
-        assert!(st.has_chat_session("oc_a", "/codex"));
-        assert!(!st.has_chat_session("oc_b", "/claude"));
-        assert_eq!(st.chat_sessions.len(), 2);
+        let chat = ConversationKey {
+            channel: "feishu".into(),
+            chat_id: "oc_a".into(),
+            topic_id: None,
+        };
+        let topic = ConversationKey {
+            topic_id: Some("omt_topic".into()),
+            ..chat.clone()
+        };
+        assert!(!st.has_chat_session(&chat, "/claude"));
+        st.record_chat_session(&chat, "/claude", 100);
+        st.record_chat_session(&chat, "/claude", 50); // never decreases
+        st.record_chat_session(&chat, "/codex", 200);
+        st.record_chat_session(&topic, "/claude", 300);
+        assert!(st.has_chat_session(&chat, "/claude"));
+        assert!(st.has_chat_session(&chat, "/codex"));
+        assert!(st.has_chat_session(&topic, "/claude"));
+        assert!(!st.has_chat_session(&topic, "/codex"));
+        assert!(!st.has_chat_session(
+            &ConversationKey {
+                chat_id: "oc_b".into(),
+                ..chat.clone()
+            },
+            "/claude"
+        ));
+        assert_eq!(st.chat_sessions.len(), 3);
         assert_eq!(
             st.chat_sessions
                 .iter()
-                .find(|s| s.prefix == "/claude")
+                .find(|s| s.prefix == "/claude" && s.topic_id.is_none())
                 .unwrap()
                 .last_success_ms,
             100
@@ -270,6 +336,16 @@ mod tests {
         let text = serde_json::to_string(&st).unwrap();
         let back: State = serde_json::from_str(&text).unwrap();
         assert_eq!(back.chat_sessions, st.chat_sessions);
+    }
+
+    #[test]
+    fn legacy_chat_session_defaults_to_feishu_without_topic() {
+        let st: State = serde_json::from_str(
+            r#"{"chat_sessions":[{"chat_id":"oc_a","prefix":"/claude","last_success_ms":1}]}"#,
+        )
+        .unwrap();
+        assert_eq!(st.chat_sessions[0].channel, "feishu");
+        assert_eq!(st.chat_sessions[0].topic_id, None);
     }
 
     #[test]

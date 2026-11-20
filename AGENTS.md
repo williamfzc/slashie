@@ -7,10 +7,13 @@ exact commit and evidence when handing work off.
 
 Start with the [documentation index](docs/index.md). Find the existing owner of
 the behavior before adding code. The [technical design](docs/DESIGN.md) owns
-runtime boundaries. Keep Feishu process and wire handling in the CLI adapter,
-admission and execution in the shared runtime, and presentation and controls in
-the Tauri host. Keep headless Rust free of GUI dependencies. Each source file
-opens with a short description of its responsibility in the system.
+runtime boundaries. Keep channel process and wire handling in the channel adapter
+(`src/lark.rs` for Feishu); the runtime depends on the `Channel` trait.
+Admission and execution belong to the shared runtime, and presentation and
+controls belong to the Tauri host. A new channel implements `Channel` and
+supplies its conversation key and workspace layout. Keep headless Rust free of
+GUI dependencies. Each source file opens with a short description of its
+responsibility in the system.
 
 Verify the boundary you changed. Use isolated state and fake transport for
 repeatable checks. For live Feishu checks, confirm the target and scope before

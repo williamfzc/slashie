@@ -16,7 +16,9 @@ Use one Rust package and one in-process runtime. Both launch modes share configu
 | --- | --- |
 | `src/main.rs` | Parse arguments, acquire the lock, and start the selected host. |
 | `src/app` | Run Tauri on the macOS main thread. Render runtime status, submit controls, and host Settings. |
-| `src/runtime` | Coordinate scans, claims, and a serial worker. Own private storage, transport, and process adapters. |
+| `src/runtime` | Coordinate scans, claims, and a serial worker. Own private storage and process execution. |
+| `src/transport.rs` | Define the `Channel` boundary, `ConversationKey`, the message shape, and the fixture channel. |
+| `src/lark.rs` | Implement the Feishu channel: CLI process, search, details, reaction, reply, and identity. |
 
 Give each host a control handle for status, polling changes, and shutdown. A coordinator serializes state transitions. Search and the worker's command and reply I/O run off the UI thread, so controls can take effect while a subprocess is waiting.
 
@@ -38,24 +40,34 @@ Use Tauri 2 for the macOS shell. Enable `tray` only in native macOS builds. Gate
 
 For v1.2, use a systemd user service under the authorized account. Invoke the foreground binary with the saved polling setting. Use `KillMode=mixed` and allow shared shutdown to finish within the stop timeout. Restart on unexpected failures. A lock conflict or unrecoverable startup fault requires operator action. Validate service credential access separately before promising operation outside a login session. [systemd service lifecycle](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html) · [systemd kill modes](https://www.freedesktop.org/software/systemd/man/latest/systemd.kill.html)
 
-## Feishu adapter
+## Channels
+
+The runtime depends on `Channel`, not on Feishu. A channel owns its wire operations, its conversation identity, and its workspace layout. Feishu is the first implementation (`id = feishu`); the fixture-backed mock implements the same trait for tests.
+
+- `conversation_key(message)` returns `{ channel, chat_id, topic_id }`. Feishu maps `thread_id` to `topic_id`; a chat without a topic uses the chat alone.
+- `workspace_dir(home, key)` returns the channel's stable session path. Feishu keeps `~/.slashie/chats/<chat-id>[/<topic-id>]` so existing agent sessions keep their working directory.
+- `search`, `mget`, `react_processing`, and `reply` are the channel's I/O. `reply` receives whether the source is in a topic and keeps the reply in that thread.
+
+A future channel implements `Channel` and is selected by the host. The configuration will grow a channel list; today the `lark_cli` block configures the Feishu channel. Session state already keys by channel, and each channel chooses its workspace layout, so the runtime and session mapping do not change when another channel is added.
+
+### Feishu channel
 
 Use `--as user` and the configured Lark CLI profile. An empty profile uses the CLI’s active default. Verify the authorized user's `open_id` and persist the binding. A changed identity blocks intake and delivery. The operator must restore the expected identity. CLI version 1.0.68 is the local inspection baseline. Pin the shipping version after live acceptance.
 
 | Operation | Contract |
 | --- | --- |
-| Search | Call raw `POST /open-apis/im/v1/messages/search` with `filter.from_ids` and whole-second RFC 3339 `filter.time_range.start_time` and `end_time`. Round the start down and the end up. Pass `page_size` and `page_token` in the query string. Read IDs from `data.items[].meta_data.message_id` and follow `has_more`. Use one strategy that passes recall tests in the release account. Try a sender-and-time search with an empty query first, then test configured-prefix queries if needed. |
-| Read details | Batch up to 50 IDs through raw `GET /open-apis/im/v1/messages/mget`. Decode `body.content`, verify sender and creation time locally, and use the verified meanings of `root_id` and `parent_id` to admit original messages only. Validate the response shape and skip unclassifiable placement. |
-| Source | Use a verified message link if available, then a conversation link if available. Always include the message ID. |
+| Search | Call raw `POST /open-apis/im/v1/messages/search` with `filter.from_ids` and whole-second RFC 3339 `filter.time_range.start_time` and `end_time`. Round the start down and the end up. Pass `page_size` and `page_token` in the query string. Read IDs from `data.items[].meta_data.message_id` and follow `has_more`. Use one strategy that passes recall tests in the release account. Try a sender-and-time search with an empty query first, then test configured-prefix queries if needed. A recent live probe confirmed that a topic root and a reply inside that topic are returned as separate IDs after indexing. |
+| Read details | Batch up to 50 IDs through raw `GET /open-apis/im/v1/messages/mget`. Decode `body.content`, verify sender and creation time locally, and decode `chat_id` and `thread_id`. A message with a `thread_id` is a topic message and is eligible even when it is a reply; a reply without a `thread_id` is an ordinary reply and is skipped. Validate the response shape and skip unclassifiable placement. |
+| Source | Use a verified message link if available, then a conversation link if available. Always include the message ID, channel, chat, and topic when present. |
 | Processing reaction | Call `im reactions create --as user` with the original message ID and `OnIt`. The serial worker makes one bounded attempt immediately before launching the command, after durable admission. The reaction requires `im:message.reactions:write_only`. Its failure does not affect execution or reply delivery. |
-| Reply | Call `im +messages-reply --as user` with the source message ID, literal text, verified placement, and an idempotency key derived from the source ID. Use one adapter attempt. A confirmed reply returns a reply ID. Distinguish definitive rejection from uncertain delivery. |
+| Reply | Call `im +messages-reply --as user` with the source message ID, literal text, `--reply-in-thread` when the source has a `thread_id`, and an idempotency key derived from the source ID. Use one adapter attempt. A confirmed reply returns a reply ID. Record that ID so it is never admitted as a new command. Distinguish definitive rejection from uncertain delivery. |
 
 The search shortcut projects out placement fields and can report successful exit with IDs only if detail retrieval fails. Use the raw adapter and validate the CLI envelope and required fields. An incomplete result or missing page blocks admission from that scan. Release requires live tests for search recall, original versus reply classification, reply placement, timestamps, permissions, and text that resembles mentions. [Pinned CLI search](https://github.com/larksuite/cli/blob/v1.0.68/shortcuts/im/im_messages_search.go) · [Pinned CLI conversion](https://github.com/larksuite/cli/blob/v1.0.68/shortcuts/im/convert_lib/content_convert.go) · [Lark CLI reply reference](https://github.com/larksuite/cli/blob/main/skills/lark-im/references/lark-im-messages-reply.md)
 
 ## Polling and claims
 
 - At the configured polling interval, start at most one scan with a fixed end time. Look back at most five minutes and locally require creation after the current start or resume time, even when the search API uses coarser timestamps. Retry transient scan failures with exponential backoff up to five minutes, honoring a longer server retry delay if supplied. Clear backoff on a complete scan. Authentication and local state faults require operator action.
-- Merge duplicate IDs and consider eligible messages in creation order, with message ID as the tiebreaker. Split at the first whitespace and do an exact prefix lookup. Preserve the internal line breaks of the remaining input. Exclude all replies using the validated Feishu placement rules.
+- Merge duplicate IDs and consider eligible messages in creation order, with message ID as the tiebreaker. Split at the first whitespace and do an exact prefix lookup. Preserve the internal line breaks of the remaining input. A topic root or a reply carrying a `thread_id` is eligible; an ordinary reply without a `thread_id` is skipped. Never admit a message ID recorded as Slashie's own reply.
 - Run one worker with at most 10 waiting jobs. Reserve space, then durably claim the message ID before handing it off. Leave candidates unclaimed when the queue is full so a later scan can find them within the window. The worker finishes a command and its reply attempt before taking the next job.
 - Keep pending and settled claims keyed by message ID. Settle each claim after its command and reply attempt. On restart, report pending claims as interrupted and settle them before pruning or polling. Replace state atomically using a synced file and directory. Missing or invalid state after initialization blocks intake.
 - Keep unsettled claims and settled claims inside the current scan horizon. Persist the latest completed scan end for diagnostics. Each scan overlaps the previous window within the five-minute horizon so late-indexed and unclaimed requests can be found. Durable claims prevent duplicate execution. Pause and claim updates are serialized. Resume sets a new time boundary, and a pause invalidates results from a scan already in flight.
@@ -70,10 +82,12 @@ Run the trusted route program with `/bin/sh -c`. Pass message data through the e
 | `SLASHIE_PROMPT` | Arguments, a blank line, and the source description. |
 | `SLASHIE_ID` | Source message ID. |
 | `SLASHIE_LINK` | Best verified source link, or an empty string. |
-| `SLASHIE_CONTEXT` | Source description: message ID, chat ID and type, link, and sender. |
-| `SLASHIE_CHAT` | Feishu chat ID, or empty when the transport cannot provide one. |
-| `SLASHIE_SESSION_DIR` | Chat workspace when the route has `session: "chat"`; otherwise empty. |
-| `SLASHIE_CONTINUE` | `1` when that chat route may resume its agent session; otherwise `0`. |
+| `SLASHIE_CONTEXT` | Source description: message ID, channel, chat ID and type, topic ID, link, and sender. |
+| `SLASHIE_CHANNEL` | Channel ID, currently `feishu`. |
+| `SLASHIE_CHAT` | Chat ID, or empty when the channel cannot provide one. |
+| `SLASHIE_TOPIC` | Topic/thread ID, or empty for a chat without a topic. |
+| `SLASHIE_SESSION_DIR` | Conversation workspace when the route has `session: "chat"`; otherwise empty. |
+| `SLASHIE_CONTINUE` | `1` when that conversation route may resume its agent session; otherwise `0`. |
 
 Quote values that may contain whitespace. Commands consuming message data should expand the variables in quotes. The runtime never interpolates message text into the shell program.
 
@@ -83,11 +97,13 @@ Drain stdout and stderr concurrently and keep at most 64 KiB of each in memory. 
 
 ### Chat sessions
 
-A route with `"session": "chat"` keeps one agent conversation per Feishu chat. It runs in `~/.slashie/chats/<chat-id>/`, created with user-only permissions. `dir` is not allowed on such a route because the workspace must stay stable for the agent's own session lookup.
+A route with `"session": "chat"` keeps one agent conversation per conversation, where a conversation is `channel + chat + topic`. It runs in the channel's workspace; Feishu uses `~/.slashie/chats/<chat-id>[/<topic-id>]/`, created with user-only permissions. `dir` is not allowed on such a route because the workspace must stay stable for the agent's own session lookup.
 
-The first successful command for a `(chat, route)` pair records that mapping in `state.json`. Later commands are told to resume: `SLASHIE_CONTINUE=1`, and the stock agent routes call `--continue` or `exec resume --last` in the same workspace. The agent CLI owns the actual session and its ID; Slashie keeps only the stable workspace and the resume decision.
+A direct-message or ordinary-group top-level message has no topic and uses the chat conversation. A topic root and every reply inside that topic share the Feishu `thread_id` and therefore share one topic conversation; different topics in the same chat are isolated. Replies are eligible commands, so a follow-up inside a topic continues the same agent session. This follows the topic-group model used by [botmux](https://github.com/deepcoldy/botmux/blob/master/docs-site/docs/zh/session-model.md): each new topic is an independent session, and a reply inside the topic continues it.
 
-A different Feishu chat gets a different workspace, so it starts fresh. A failed first command does not create the mapping. To reset an existing chat, stop Slashie, delete `chats/<chat-id>/`, and remove that chat's entries from `state.json`; the next command starts a new agent session. If the agent's own session store is deleted, the resume command fails and the reply carries the diagnostic.
+The first successful command for a `(conversation, route)` pair records that mapping in `state.json`. Later commands are told to resume: `SLASHIE_CONTINUE=1`, and the stock agent routes call `--continue` or `exec resume --last` in the same workspace. The agent CLI owns the actual session and its ID; Slashie keeps only the stable workspace and the resume decision.
+
+A different chat or topic gets a different workspace, so it starts fresh. A failed first command does not create the mapping. To reset an existing conversation, stop Slashie, delete its workspace, and remove its entries from `state.json`; the next command starts a new agent session. If the agent's own session store is deleted, the resume command fails and the reply carries the diagnostic.
 
 ## Configuration and files
 
@@ -109,15 +125,15 @@ Read and validate configuration once at launch. Configure the Lark CLI executabl
 }
 ```
 
-On initial setup, the stock configuration includes `/ping` (replies `pong`), `/pi` (Pi), `/claude` (Claude Code), and `/codex` (Codex). These are editable routes. Start with polling paused. Put the installed tools and any required runtime, such as Node, in `process_path`. The three agent routes use `session: "chat"` and switch to the agent's resume form when `SLASHIE_CONTINUE` is `1`. Their own conversation is resumed per chat; reading the rest of the Feishu chat still requires a separate context tool.
+On initial setup, the stock configuration includes `/ping` (replies `pong`), `/pi` (Pi), `/claude` (Claude Code), and `/codex` (Codex). These are editable routes. Start with polling paused. Put the installed tools and any required runtime, such as Node, in `process_path`. The three agent routes use `session: "chat"` and switch to the agent's resume form when `SLASHIE_CONTINUE` is `1`. Their own conversation is resumed per chat or topic; reading the rest of the Feishu chat still requires a separate context tool.
 
-`poll_interval` is 10, 20, 30, or 60 seconds and defaults to 20. Each prefix is a unique slash-prefixed token. Each `cmd` is a nonempty shell program. An optional route `dir` is an absolute path or starts with `~/`. It defaults to the user's home directory. An optional `timeout` is a positive integer in seconds, defaulting to 30. An optional `session` may be `"chat"` for one agent session per Feishu chat; it cannot be combined with `dir`. `process_path` contains ordered absolute directories and defaults to the example.
+`poll_interval` is 10, 20, 30, or 60 seconds and defaults to 20. Each prefix is a unique slash-prefixed token. Each `cmd` is a nonempty shell program. An optional route `dir` is an absolute path or starts with `~/`. It defaults to the user's home directory. An optional `timeout` is a positive integer in seconds, defaulting to 30. An optional `session` may be `"chat"` for one agent session per conversation (chat or topic); it cannot be combined with `dir`. `process_path` contains ordered absolute directories and defaults to the example.
 
 | File | Source of truth |
 | --- | --- |
 | `config.json` | Polling interval, CLI and path settings, and route definitions. Restart after edits. |
-| `state.json` | Polling setting, identity binding, latest completed scan end, consumed IDs, and the chat-to-session mapping. |
-| `chats/<chat-id>/` | Per-chat agent workspace for routes with `session: "chat"`. User-only permissions. |
+| `state.json` | Polling setting, identity binding, latest completed scan end, consumed IDs, the channel/chat/topic session mapping, and delivered reply IDs. |
+| `chats/<chat-id>[/<topic-id>]/` | Per-conversation agent workspace for routes with `session: "chat"`. User-only permissions. |
 | `app.lock` | Instance ownership via a held descriptor. |
 | `slashie.log` | Timestamps, IDs, durations, and outcomes. Rotate at 2 MiB and keep one previous log. |
 

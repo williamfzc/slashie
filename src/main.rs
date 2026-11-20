@@ -165,7 +165,7 @@ fn main() {
     let (config, config_fault) = config::Config::load_or_create(&home)
         .unwrap_or_else(|e| fail(&format!("cannot read config.json: {}", e)));
 
-    let (transport, identity): (Arc<dyn transport::Transport>, String) = match &mock_path {
+    let (transport, identity): (Arc<dyn transport::Channel>, String) = match &mock_path {
         Some(path) => {
             let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
                 fail(&format!(
@@ -177,7 +177,7 @@ fn main() {
             let mock =
                 Arc::new(transport::MockTransport::from_json(&text).unwrap_or_else(|e| fail(&e)));
             let id = mock.self_open_id().to_string();
-            let t: Arc<dyn transport::Transport> = mock;
+            let t: Arc<dyn transport::Channel> = mock;
             (t, id)
         }
         None if poll.is_some() => {
@@ -212,7 +212,7 @@ fn main() {
                 ))
             });
             lark.set_self_id(&id);
-            let t: Arc<dyn transport::Transport> = lark;
+            let t: Arc<dyn transport::Channel> = lark;
             (t, id)
         }
     };
