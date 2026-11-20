@@ -117,7 +117,9 @@ fn main() {
                 });
             }
             "--mock" => {
-                let v = args.next().unwrap_or_else(|| fail("--mock requires a fixture path"));
+                let v = args
+                    .next()
+                    .unwrap_or_else(|| fail("--mock requires a fixture path"));
                 mock_path = Some(PathBuf::from(v));
             }
             other => fail(&format!("unknown argument {:?}; try --help", other)),
@@ -134,7 +136,8 @@ fn main() {
     let menu_bar_mode = !headless && std::env::var("SLASHIE_HEADLESS").is_err();
 
     let home = runtime_home();
-    std::fs::create_dir_all(&home).unwrap_or_else(|e| fail(&format!("cannot create {}: {}", home.display(), e)));
+    std::fs::create_dir_all(&home)
+        .unwrap_or_else(|e| fail(&format!("cannot create {}: {}", home.display(), e)));
 
     // Exclusive instance lock, held until shutdown; a Finder-launched second
     // instance shows the native alert and exits.
@@ -159,16 +162,20 @@ fn main() {
 
     // Load (or create) configuration before choosing the transport so both
     // launch paths share the same config file and validator.
-    let (config, config_fault) =
-        config::Config::load_or_create(&home).unwrap_or_else(|e| fail(&format!("cannot read config.json: {}", e)));
+    let (config, config_fault) = config::Config::load_or_create(&home)
+        .unwrap_or_else(|e| fail(&format!("cannot read config.json: {}", e)));
 
     let (transport, identity): (Arc<dyn transport::Transport>, String) = match &mock_path {
         Some(path) => {
-            let text = std::fs::read_to_string(path)
-                .unwrap_or_else(|e| fail(&format!("cannot read mock fixture {}: {}", path.display(), e)));
-            let mock = Arc::new(
-                transport::MockTransport::from_json(&text).unwrap_or_else(|e| fail(&e)),
-            );
+            let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+                fail(&format!(
+                    "cannot read mock fixture {}: {}",
+                    path.display(),
+                    e
+                ))
+            });
+            let mock =
+                Arc::new(transport::MockTransport::from_json(&text).unwrap_or_else(|e| fail(&e)));
             let id = mock.self_open_id().to_string();
             let t: Arc<dyn transport::Transport> = mock;
             (t, id)
@@ -176,14 +183,16 @@ fn main() {
         None if poll.is_some() => {
             // Control invocation: no transport is needed to update the
             // persisted polling setting under the lock.
-            let ok = runtime::apply_poll_control(&home, poll.unwrap())
-                .unwrap_or_else(|e| fail(&e));
+            let ok = runtime::apply_poll_control(&home, poll.unwrap()).unwrap_or_else(|e| fail(&e));
             println!("polling set to {}", if ok { "on" } else { "off" });
             return;
         }
         None => {
             if let Some(fault) = &config_fault {
-                fail(&format!("config.json is invalid: {} (fix the file and restart)", fault));
+                fail(&format!(
+                    "config.json is invalid: {} (fix the file and restart)",
+                    fault
+                ));
             }
             let cli = config.lark_cli.clone().unwrap_or_else(|| {
                 fail(
@@ -197,7 +206,10 @@ fn main() {
                 shutdown.clone(),
             ));
             let id = lark.verify_identity().unwrap_or_else(|e| {
-                fail(&format!("identity verification failed: {} (operator action required)", e))
+                fail(&format!(
+                    "identity verification failed: {} (operator action required)",
+                    e
+                ))
             });
             lark.set_self_id(&id);
             let t: Arc<dyn transport::Transport> = lark;
@@ -224,7 +236,10 @@ fn main() {
 
     if let Some(reason) = rt.intake_blocked.lock().unwrap().clone() {
         logger.log(&format!("ERROR intake blocked: {}", reason));
-        eprintln!("slashie: intake blocked: {} (operator action required)", reason);
+        eprintln!(
+            "slashie: intake blocked: {} (operator action required)",
+            reason
+        );
         // Keep the fault observable; a control run still exits nonzero.
         if poll.is_some() {
             std::process::exit(3);

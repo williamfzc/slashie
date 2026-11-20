@@ -132,7 +132,12 @@ pub fn run_command(
         Ok(c) => c,
         Err(e) => {
             return Outcome {
-                reply_text: compose_reply(false, &[], format!("spawn failed: {}", e).as_bytes(), false),
+                reply_text: compose_reply(
+                    false,
+                    &[],
+                    format!("spawn failed: {}", e).as_bytes(),
+                    false,
+                ),
                 termination: "exit".into(),
                 exit_code: None,
                 duration_ms: started.elapsed().as_millis() as u64,
@@ -216,7 +221,8 @@ pub fn run_command(
 
     if timed_out || termination == "shutdown" {
         // Wait up to 2s for the group to die, then SIGKILL survivors.
-        let wait_until = std::time::Instant::now() + std::time::Duration::from_millis(GROUP_KILL_WAIT_MS);
+        let wait_until =
+            std::time::Instant::now() + std::time::Duration::from_millis(GROUP_KILL_WAIT_MS);
         while std::time::Instant::now() < wait_until {
             // group_alive: kill(pgid, 0)
             let alive = unsafe { libc::kill(-pgid, 0) } == 0;
@@ -287,14 +293,27 @@ mod tests {
     #[test]
     fn compose_reply_contracts() {
         assert_eq!(compose_reply(true, b"pong\n", b"", false), "pong");
-        assert_eq!(compose_reply(true, b"   \n", b"", false), "Done. (no output)");
-        assert_eq!(compose_reply(false, b"", b"boom", false), "Command failed.\nboom");
-        assert_eq!(compose_reply(false, b"out only", b"", false), "Command failed.\nout only");
+        assert_eq!(
+            compose_reply(true, b"   \n", b"", false),
+            "Done. (no output)"
+        );
+        assert_eq!(
+            compose_reply(false, b"", b"boom", false),
+            "Command failed.\nboom"
+        );
+        assert_eq!(
+            compose_reply(false, b"out only", b"", false),
+            "Command failed.\nout only"
+        );
         assert_eq!(compose_reply(false, b"", b"", true), "Command timed out.");
         let long = "x".repeat(4500);
         let r = compose_reply(true, long.as_bytes(), b"", false);
         let notice = "[truncated: output exceeded 4000 characters]";
-        assert_eq!(r.chars().count(), 4000, "complete reply stays within the limit");
+        assert_eq!(
+            r.chars().count(),
+            4000,
+            "complete reply stays within the limit"
+        );
         assert!(r.ends_with(notice));
     }
 
@@ -321,7 +340,14 @@ mod tests {
     fn metacharacters_cannot_change_program() {
         let shutdown = Arc::new(AtomicBool::new(false));
         let args = " rm -rf /; echo pwned";
-        let out = run_command(&route("echo got:$SLASHIE_ARGS"), args, "", &[], "/tmp", shutdown);
+        let out = run_command(
+            &route("echo got:$SLASHIE_ARGS"),
+            args,
+            "",
+            &[],
+            "/tmp",
+            shutdown,
+        );
         assert!(out.reply_text.starts_with("got: rm -rf /; echo pwned"));
         assert!(!out.reply_text.contains("pwned") || out.reply_text.starts_with("got:"));
     }
@@ -358,7 +384,14 @@ mod tests {
     #[test]
     fn failing_command_reports_diagnostics() {
         let shutdown = Arc::new(AtomicBool::new(false));
-        let out = run_command(&route("echo out; echo err >&2; exit 3"), "", "", &[], "/tmp", shutdown);
+        let out = run_command(
+            &route("echo out; echo err >&2; exit 3"),
+            "",
+            "",
+            &[],
+            "/tmp",
+            shutdown,
+        );
         assert_eq!(out.exit_code, Some(3));
         assert_eq!(out.reply_text, "Command failed.\nerr");
     }

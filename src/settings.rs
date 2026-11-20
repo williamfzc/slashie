@@ -110,9 +110,9 @@ impl SettingsDraft {
                     .get(i)
                     .filter(|r| r.prefix == d.prefix)
                     .or_else(|| {
-                        base.routes
-                            .iter()
-                            .find(|r| r.prefix == d.prefix && (r.dir.is_some() || r.timeout.is_some()))
+                        base.routes.iter().find(|r| {
+                            r.prefix == d.prefix && (r.dir.is_some() || r.timeout.is_some())
+                        })
                     });
                 Route {
                     prefix: d.prefix.clone(),
@@ -148,11 +148,7 @@ pub enum SaveOutcome {
 
 /// Persist a draft. `loaded_snapshot` is the config.json text the window
 /// loaded; if the file's current text differs, the save is rejected.
-pub fn save_settings(
-    home: &Path,
-    loaded_snapshot: &str,
-    draft: &SettingsDraft,
-) -> SaveOutcome {
+pub fn save_settings(home: &Path, loaded_snapshot: &str, draft: &SettingsDraft) -> SaveOutcome {
     let path = home.join("config.json");
     let current = match std::fs::read_to_string(&path) {
         Ok(t) => t,
@@ -272,7 +268,10 @@ mod tests {
 
         // Saving against a stale snapshot is rejected.
         let d2 = draft(60, &[("/ping", "echo pong")]);
-        assert_eq!(save_settings(&dir, &snapshot, &d2), SaveOutcome::FileChanged);
+        assert_eq!(
+            save_settings(&dir, &snapshot, &d2),
+            SaveOutcome::FileChanged
+        );
 
         // A changed snapshot validates against the CURRENT file, not the
         // stale one; matching snapshot saves fine.

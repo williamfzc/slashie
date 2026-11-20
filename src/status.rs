@@ -107,10 +107,7 @@ mod tests {
         s.operator_action = Some(OperatorFault::SignInToFeishu);
         assert_eq!(status_line(&s), Some("Sign in to Feishu and restart"));
         s.operator_action = Some(OperatorFault::CouldNotSavePollingSetting);
-        assert_eq!(
-            status_line(&s),
-            Some("Could not save polling setting")
-        );
+        assert_eq!(status_line(&s), Some("Could not save polling setting"));
         s.operator_action = Some(OperatorFault::LocalStateUnavailable);
         assert_eq!(status_line(&s), Some("Local state unavailable"));
         s.operator_action = None;

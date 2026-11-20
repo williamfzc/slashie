@@ -85,10 +85,7 @@ pub fn load_or_init(home: &Path) -> Result<StateLoad, StateError> {
             let mut seen: Vec<&str> = Vec::new();
             for c in &st.claims {
                 if seen.contains(&c.message_id.as_str()) {
-                    return Err(StateError(format!(
-                        "duplicate claim for {}",
-                        c.message_id
-                    )));
+                    return Err(StateError(format!("duplicate claim for {}", c.message_id)));
                 }
                 seen.push(&c.message_id);
             }
@@ -96,8 +93,7 @@ pub fn load_or_init(home: &Path) -> Result<StateLoad, StateError> {
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let st = State::default();
-            save(home, &st)
-                .map_err(|e| StateError(format!("cannot create state.json: {}", e)))?;
+            save(home, &st).map_err(|e| StateError(format!("cannot create state.json: {}", e)))?;
             Ok(StateLoad::Created(st))
         }
         Err(e) => Err(StateError(format!("cannot read state.json: {}", e))),
@@ -105,8 +101,7 @@ pub fn load_or_init(home: &Path) -> Result<StateLoad, StateError> {
 }
 
 pub fn save(home: &Path, st: &State) -> Result<(), std::io::Error> {
-    let text = serde_json::to_string_pretty(st)
-        .map_err(std::io::Error::other)?;
+    let text = serde_json::to_string_pretty(st).map_err(std::io::Error::other)?;
     crate::config::atomic_write(&state_path(home), &text)
 }
 

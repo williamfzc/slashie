@@ -29,7 +29,11 @@ impl Logger {
         self.rotate_if_needed();
         let stamp = chrono_millis_now();
         let full = format!("{} {}\n", rfc3339_millis(stamp), line);
-        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&self.path) {
+        if let Ok(mut f) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
             let _ = f.write_all(full.as_bytes());
         }
         if self.mirror_stderr {
@@ -109,17 +113,29 @@ mod tests {
     fn rfc3339_known_values() {
         assert_eq!(rfc3339_millis(0), "1970-01-01T00:00:00.000Z");
         // 2026-11-19T14:00:00Z
-        assert_eq!(rfc3339_millis(1_795_096_800_000), "2026-11-19T14:00:00.000Z");
+        assert_eq!(
+            rfc3339_millis(1_795_096_800_000),
+            "2026-11-19T14:00:00.000Z"
+        );
     }
 
     #[test]
     fn rfc3339_second_precision_rounds_outward() {
         // Floor rounds down; ceil rounds up; whole seconds stay exact.
-        assert_eq!(rfc3339_secs_floor(1_795_096_800_000), "2026-11-19T14:00:00Z");
+        assert_eq!(
+            rfc3339_secs_floor(1_795_096_800_000),
+            "2026-11-19T14:00:00Z"
+        );
         assert_eq!(rfc3339_secs_ceil(1_795_096_800_000), "2026-11-19T14:00:00Z");
-        assert_eq!(rfc3339_secs_floor(1_795_096_800_001), "2026-11-19T14:00:00Z");
+        assert_eq!(
+            rfc3339_secs_floor(1_795_096_800_001),
+            "2026-11-19T14:00:00Z"
+        );
         assert_eq!(rfc3339_secs_ceil(1_795_096_800_001), "2026-11-19T14:00:01Z");
-        assert_eq!(rfc3339_secs_floor(1_795_096_809_999), "2026-11-19T14:00:09Z");
+        assert_eq!(
+            rfc3339_secs_floor(1_795_096_809_999),
+            "2026-11-19T14:00:09Z"
+        );
         assert_eq!(rfc3339_secs_ceil(1_795_096_809_999), "2026-11-19T14:00:10Z");
         // No fractional seconds anywhere (live search rejects them).
         let f = rfc3339_secs_floor(1);

@@ -146,7 +146,9 @@ impl Config {
 
     /// Load config.json, creating the default (fixed /ping) on a new
     /// installation. Returns the config plus any fault for intake blocking.
-    pub fn load_or_create(home: &std::path::Path) -> Result<(Config, Option<String>), std::io::Error> {
+    pub fn load_or_create(
+        home: &std::path::Path,
+    ) -> Result<(Config, Option<String>), std::io::Error> {
         match std::fs::read_to_string(home.join("config.json")) {
             Ok(text) => match Config::parse(&text) {
                 Ok(c) => Ok((c, None)),

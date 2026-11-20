@@ -77,14 +77,8 @@ fn build_tray(
     };
 
     let status_item = MenuItem::with_id(&app, "status", "", false, None::<&str>)?;
-    let polling = CheckMenuItem::with_id(
-        &app,
-        "polling",
-        "Polling",
-        true,
-        polling_now,
-        None::<&str>,
-    )?;
+    let polling =
+        CheckMenuItem::with_id(&app, "polling", "Polling", true, polling_now, None::<&str>)?;
     let settings_item = MenuItem::with_id(&app, "settings", "Settings…", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(&app)?;
     let quit = MenuItem::with_id(&app, "quit", "Quit Slashie", true, None::<&str>)?;
@@ -109,7 +103,12 @@ fn build_tray(
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(move |app, event| {
-            handle_menu_event(app, event.id().as_ref(), shutdown.clone(), runtime_thread.clone());
+            handle_menu_event(
+                app,
+                event.id().as_ref(),
+                shutdown.clone(),
+                runtime_thread.clone(),
+            );
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
@@ -222,10 +221,11 @@ fn handle_menu_event(
                 .build();
             }
         }
-        "quit" if state
-            .shutting_down
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok() =>
+        "quit"
+            if state
+                .shutting_down
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok() =>
         {
             // Shared shutdown: request it, wait for the runtime to drain
             // accepted work, then exit.

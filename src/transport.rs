@@ -146,17 +146,21 @@ impl MockTransport {
 
 impl Transport for MockTransport {
     fn search(&self, from_ms: i64, to_ms: i64) -> Result<Vec<String>, TransportError> {
-        let left = self
-            .search_failures_left
-            .try_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |n| {
+        let left = self.search_failures_left.try_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |n| {
                 if n > 0 {
                     Some(n - 1)
                 } else {
                     None
                 }
-            });
+            },
+        );
         if left.is_ok() {
-            return Err(TransportError::Transient("mock transient search failure".into()));
+            return Err(TransportError::Transient(
+                "mock transient search failure".into(),
+            ));
         }
         Ok(self
             .fixture
@@ -172,7 +176,10 @@ impl Transport for MockTransport {
         let mut out = Vec::new();
         for id in ids {
             if missing.contains(id) {
-                return Err(TransportError::Incomplete(format!("missing detail for {}", id)));
+                return Err(TransportError::Incomplete(format!(
+                    "missing detail for {}",
+                    id
+                )));
             }
             match self.fixture.messages.iter().find(|m| &m.id == id) {
                 Some(m) => out.push(m.clone()),
@@ -242,8 +249,18 @@ mod tests {
                 ..Default::default()
             },
         });
-        assert_eq!(t.search(0, 1), Err(TransportError::Transient("mock transient search failure".into())));
-        assert_eq!(t.search(0, 1), Err(TransportError::Transient("mock transient search failure".into())));
+        assert_eq!(
+            t.search(0, 1),
+            Err(TransportError::Transient(
+                "mock transient search failure".into()
+            ))
+        );
+        assert_eq!(
+            t.search(0, 1),
+            Err(TransportError::Transient(
+                "mock transient search failure".into()
+            ))
+        );
         assert_eq!(t.search(0, 1), Ok(vec![]));
     }
 
@@ -278,7 +295,10 @@ mod tests {
         assert!(matches!(t.reply("om_1", "x"), Err(ReplyError::Rejected(_))));
         t.fixture.behavior.reply_rejected = false;
         t.fixture.behavior.reply_uncertain = true;
-        assert!(matches!(t.reply("om_1", "x"), Err(ReplyError::Uncertain(_))));
+        assert!(matches!(
+            t.reply("om_1", "x"),
+            Err(ReplyError::Uncertain(_))
+        ));
         // Uncertain attempts are not recorded as sent.
         assert_eq!(t.reply_records().len(), 1);
     }

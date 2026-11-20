@@ -54,7 +54,8 @@ pub struct LoadedConfig {
 /// under the lock, then exit. Identity binding and intake recovery still
 /// happen on the next full startup.
 pub fn apply_poll_control(home: &PathBuf, on: bool) -> Result<bool, String> {
-    std::fs::create_dir_all(home).map_err(|e| error(format!("cannot create runtime dir: {}", e)))?;
+    std::fs::create_dir_all(home)
+        .map_err(|e| error(format!("cannot create runtime dir: {}", e)))?;
     let mut st = match load_or_init(home) {
         Ok(StateLoad::Created(s)) => s,
         Ok(StateLoad::Loaded(s)) => s,
@@ -83,8 +84,13 @@ impl Runtime {
             config,
             fault: config_fault,
         } = loaded;
-        std::fs::create_dir_all(&home)
-            .map_err(|e| error(format!("cannot create runtime dir {}: {}", home.display(), e)))?;
+        std::fs::create_dir_all(&home).map_err(|e| {
+            error(format!(
+                "cannot create runtime dir {}: {}",
+                home.display(),
+                e
+            ))
+        })?;
 
         let (state, state_fault) = match load_or_init(&home) {
             Ok(StateLoad::Created(s)) => (s, None),
@@ -122,11 +128,7 @@ impl Runtime {
             let _ = runtime.apply_poll_setting(on);
         }
         runtime.refresh_status();
-        runtime
-            .status
-            .lock()
-            .unwrap()
-            .phase = None;
+        runtime.status.lock().unwrap().phase = None;
         Ok(runtime)
     }
 
@@ -268,7 +270,8 @@ impl Runtime {
             }
             Err(TransportError::Incomplete(m)) => {
                 // An incomplete result blocks admission from this scan.
-                self.logger.log(&format!("scan incomplete, admission blocked: {}", m));
+                self.logger
+                    .log(&format!("scan incomplete, admission blocked: {}", m));
                 return Ok(0);
             }
         };
@@ -283,7 +286,8 @@ impl Runtime {
         let details = match self.transport.mget(&unique) {
             Ok(d) => d,
             Err(TransportError::Incomplete(m)) => {
-                self.logger.log(&format!("scan incomplete, admission blocked: {}", m));
+                self.logger
+                    .log(&format!("scan incomplete, admission blocked: {}", m));
                 return Ok(0);
             }
             Err(e) => {
@@ -306,10 +310,7 @@ impl Runtime {
             .filter(|m| {
                 let text = m.text.as_ref().unwrap();
                 let first = text.split_whitespace().next().unwrap_or("");
-                self.config
-                    .routes
-                    .iter()
-                    .any(|r| r.prefix == first)
+                self.config.routes.iter().any(|r| r.prefix == first)
             })
             .collect();
         // Creation order, message ID as tiebreaker.
@@ -333,7 +334,8 @@ impl Runtime {
                 let mut st = self.state.lock().unwrap();
                 // Pause invalidates results from a scan already in flight.
                 if !st.polling || self.shutdown.load(Ordering::SeqCst) {
-                    self.logger.log("scan results invalidated by pause or shutdown");
+                    self.logger
+                        .log("scan results invalidated by pause or shutdown");
                     break;
                 }
                 if st.is_consumed(&m.id) {
@@ -341,7 +343,8 @@ impl Runtime {
                 }
                 // Reserve space, then durably claim before handoff.
                 if st.waiting_count() >= MAX_WAITING_JOBS {
-                    self.logger.log("queue full; leaving candidates for a later scan");
+                    self.logger
+                        .log("queue full; leaving candidates for a later scan");
                     break;
                 }
                 st.add_claim(&m.id, now_ms());
@@ -394,9 +397,7 @@ impl Runtime {
         ));
 
         // Exactly one reply attempt targeting the original message.
-        let reply_result = self
-            .transport
-            .reply(&job.message.id, &outcome.reply_text);
+        let reply_result = self.transport.reply(&job.message.id, &outcome.reply_text);
         let reply_state = match reply_result {
             Ok(reply_id) => {
                 self.logger.log(&format!(
@@ -432,11 +433,14 @@ impl Runtime {
             let mut st = self.state.lock().unwrap();
             st.settle_claim(&job.message.id, now_ms(), &outcome_code);
             if let Err(e) = save(&self.home, &st) {
-                self.logger
-                    .log(&format!("ERROR cannot persist settle for {}: {}", job.message.id, e));
+                self.logger.log(&format!(
+                    "ERROR cannot persist settle for {}: {}",
+                    job.message.id, e
+                ));
             }
         }
-        self.logger.log(&format!("settled {} ({})", job.message.id, outcome_code));
+        self.logger
+            .log(&format!("settled {} ({})", job.message.id, outcome_code));
         let _ = timeout_secs;
     }
 
@@ -491,12 +495,17 @@ fn home_dir() -> String {
 mod tests {
     use super::*;
     use crate::logging::Logger;
-    use crate::transport::{
-        Message, MockBehavior, MockFixture, MockTransport, ReplyError,
-    };
+    use crate::transport::{Message, MockBehavior, MockFixture, MockTransport, ReplyError};
     use std::sync::atomic::AtomicBool;
 
-    fn mkmsg(id: &str, ts: i64, sender: &str, text: Option<&str>, top_level: bool, recalled: bool) -> Message {
+    fn mkmsg(
+        id: &str,
+        ts: i64,
+        sender: &str,
+        text: Option<&str>,
+        top_level: bool,
+        recalled: bool,
+    ) -> Message {
         Message {
             id: id.into(),
             sender: sender.into(),
@@ -524,14 +533,21 @@ mod tests {
         }
     }
 
-    fn init_rt(name: &str, fixture: MockFixture, boundary_ms: i64) -> (Runtime, Arc<MockTransport>, PathBuf) {
+    fn init_rt(
+        name: &str,
+        fixture: MockFixture,
+        boundary_ms: i64,
+    ) -> (Runtime, Arc<MockTransport>, PathBuf) {
         let home = test_home(name);
         let mock = Arc::new(MockTransport::new(fixture));
         let shutdown = Arc::new(AtomicBool::new(false));
         let logger = Arc::new(Logger::new(&home, false));
         let rt = Runtime::init(
             home.clone(),
-            LoadedConfig { config: Config::default(), fault: None },
+            LoadedConfig {
+                config: Config::default(),
+                fault: None,
+            },
             mock.clone(),
             "ou_self".into(),
             shutdown,
@@ -556,7 +572,10 @@ mod tests {
         assert_eq!(fault, None, "fresh install has no config fault");
         let rt = Runtime::init(
             home.clone(),
-            LoadedConfig { config: cfg, fault: None },
+            LoadedConfig {
+                config: cfg,
+                fault: None,
+            },
             mock.clone(),
             "ou_self".into(),
             Arc::new(AtomicBool::new(false)),
@@ -565,7 +584,8 @@ mod tests {
         )
         .unwrap();
         // Config created with fixed /ping route.
-        let cfg = Config::parse(&std::fs::read_to_string(home.join("config.json")).unwrap()).unwrap();
+        let cfg =
+            Config::parse(&std::fs::read_to_string(home.join("config.json")).unwrap()).unwrap();
         assert_eq!(cfg.routes[0].prefix, "/ping");
         assert_eq!(cfg.routes[0].cmd, "echo pong");
         // State created paused.
@@ -585,13 +605,55 @@ mod tests {
         let now = now_ms();
         let boundary = now - 60_000;
         let msgs = vec![
-            mkmsg("om_ping", boundary + 1_000, "ou_self", Some("/ping"), true, false),
-            mkmsg("om_near", boundary + 2_000, "ou_self", Some("/pingpong"), true, false),
-            mkmsg("om_other", boundary + 3_000, "ou_friend", Some("/ping hi"), true, false),
-            mkmsg("om_reply", boundary + 4_000, "ou_self", Some("/ping in a reply"), false, false),
-            mkmsg("om_recalled", boundary + 5_000, "ou_self", Some("/ping"), true, true),
+            mkmsg(
+                "om_ping",
+                boundary + 1_000,
+                "ou_self",
+                Some("/ping"),
+                true,
+                false,
+            ),
+            mkmsg(
+                "om_near",
+                boundary + 2_000,
+                "ou_self",
+                Some("/pingpong"),
+                true,
+                false,
+            ),
+            mkmsg(
+                "om_other",
+                boundary + 3_000,
+                "ou_friend",
+                Some("/ping hi"),
+                true,
+                false,
+            ),
+            mkmsg(
+                "om_reply",
+                boundary + 4_000,
+                "ou_self",
+                Some("/ping in a reply"),
+                false,
+                false,
+            ),
+            mkmsg(
+                "om_recalled",
+                boundary + 5_000,
+                "ou_self",
+                Some("/ping"),
+                true,
+                true,
+            ),
             mkmsg("om_nontext", boundary + 6_000, "ou_self", None, true, false),
-            mkmsg("om_before", boundary - 1_000, "ou_self", Some("/ping"), true, false),
+            mkmsg(
+                "om_before",
+                boundary - 1_000,
+                "ou_self",
+                Some("/ping"),
+                true,
+                false,
+            ),
         ];
         let (rt, _mock, home) = init_rt("admission", fixture_with(msgs), boundary);
         let claimed = rt.scan_once().unwrap();
@@ -611,7 +673,14 @@ mod tests {
     fn duplicate_delivery_claims_once() {
         let now = now_ms();
         let boundary = now - 60_000;
-        let msgs = vec![mkmsg("om_dup", boundary + 1_000, "ou_self", Some("/ping"), true, false)];
+        let msgs = vec![mkmsg(
+            "om_dup",
+            boundary + 1_000,
+            "ou_self",
+            Some("/ping"),
+            true,
+            false,
+        )];
         let (rt, _mock, home) = init_rt("duplicate", fixture_with(msgs), boundary);
         assert_eq!(rt.scan_once().unwrap(), 1);
         // Same message delivered again in a later scan (duplicate delivery).
@@ -629,11 +698,23 @@ mod tests {
         let now = now_ms();
         let boundary = now - 60_000;
         let msgs: Vec<Message> = (0..12)
-            .map(|i| mkmsg(&format!("om_q{}", i), boundary + 1_000 + i, "ou_self", Some("/ping"), true, false))
+            .map(|i| {
+                mkmsg(
+                    &format!("om_q{}", i),
+                    boundary + 1_000 + i,
+                    "ou_self",
+                    Some("/ping"),
+                    true,
+                    false,
+                )
+            })
             .collect();
         let (rt, _mock, home) = init_rt("queue", fixture_with(msgs), boundary);
         let claimed = rt.scan_once().unwrap();
-        assert_eq!(claimed, MAX_WAITING_JOBS, "only 10 reserved; rest wait for a later scan");
+        assert_eq!(
+            claimed, MAX_WAITING_JOBS,
+            "only 10 reserved; rest wait for a later scan"
+        );
         let st = match load_or_init(&home).unwrap() {
             StateLoad::Loaded(s) => s,
             _ => panic!(),
@@ -646,11 +727,25 @@ mod tests {
     fn job_runs_once_with_mock_reply_then_never_reruns() {
         let now = now_ms();
         let boundary = now - 60_000;
-        let msgs = vec![mkmsg("om_once", boundary + 1_000, "ou_self", Some("/ping"), true, false)];
+        let msgs = vec![mkmsg(
+            "om_once",
+            boundary + 1_000,
+            "ou_self",
+            Some("/ping"),
+            true,
+            false,
+        )];
         let (rt, mock, home) = init_rt("once", fixture_with(msgs), boundary);
         assert_eq!(rt.scan_once().unwrap(), 1);
         let job = Job {
-            message: mkmsg("om_once", boundary + 1_000, "ou_self", Some("/ping"), true, false),
+            message: mkmsg(
+                "om_once",
+                boundary + 1_000,
+                "ou_self",
+                Some("/ping"),
+                true,
+                false,
+            ),
             route: rt.config.routes[0].clone(),
         };
         rt.process_job(job);
@@ -674,7 +769,14 @@ mod tests {
     fn pending_claim_interrupted_on_restart_never_reruns() {
         let now = now_ms();
         let boundary = now - 60_000;
-        let msgs = vec![mkmsg("om_crash", boundary + 1_000, "ou_self", Some("/ping"), true, false)];
+        let msgs = vec![mkmsg(
+            "om_crash",
+            boundary + 1_000,
+            "ou_self",
+            Some("/ping"),
+            true,
+            false,
+        )];
         let home = test_home("crash");
         // Simulate a crash after claim: write state with a pending claim.
         let mut st = State {
@@ -688,7 +790,10 @@ mod tests {
         let logger = Arc::new(Logger::new(&home, false));
         let rt = Runtime::init(
             home.clone(),
-            LoadedConfig { config: Config::default(), fault: None },
+            LoadedConfig {
+                config: Config::default(),
+                fault: None,
+            },
             mock.clone(),
             "ou_self".into(),
             Arc::new(AtomicBool::new(false)),
@@ -703,7 +808,10 @@ mod tests {
             _ => panic!(),
         };
         assert_eq!(st2.claims[0].status, ClaimStatus::Settled);
-        assert_eq!(st2.claims[0].outcome.as_deref(), Some("interrupted_on_restart"));
+        assert_eq!(
+            st2.claims[0].outcome.as_deref(),
+            Some("interrupted_on_restart")
+        );
         // It is consumed: no re-run, no reply.
         assert_eq!(rt.scan_once().unwrap(), 0);
         assert_eq!(mock.reply_records().len(), 0);
@@ -715,8 +823,22 @@ mod tests {
         let now = now_ms();
         let boundary = now - 60_000;
         let msgs = vec![
-            mkmsg("om_before_pause", boundary + 1_000, "ou_self", Some("/ping"), true, false),
-            mkmsg("om_after_pause", boundary + 2_000, "ou_self", Some("/ping"), true, false),
+            mkmsg(
+                "om_before_pause",
+                boundary + 1_000,
+                "ou_self",
+                Some("/ping"),
+                true,
+                false,
+            ),
+            mkmsg(
+                "om_after_pause",
+                boundary + 2_000,
+                "ou_self",
+                Some("/ping"),
+                true,
+                false,
+            ),
         ];
         let (rt, mock, home) = init_rt("pause", fixture_with(msgs), boundary);
         assert_eq!(rt.scan_once().unwrap(), 2);
@@ -752,7 +874,14 @@ mod tests {
     fn incomplete_result_blocks_admission_for_that_scan() {
         let now = now_ms();
         let boundary = now - 60_000;
-        let mut f = fixture_with(vec![mkmsg("om_blk", boundary + 1_000, "ou_self", Some("/ping"), true, false)]);
+        let mut f = fixture_with(vec![mkmsg(
+            "om_blk",
+            boundary + 1_000,
+            "ou_self",
+            Some("/ping"),
+            true,
+            false,
+        )]);
         f.behavior.mget_missing_ids = vec!["om_blk".into()];
         let (rt, mock, home) = init_rt("incomplete", f, boundary);
         assert_eq!(rt.scan_once().unwrap(), 0);
@@ -777,7 +906,10 @@ mod tests {
         let logger = Arc::new(Logger::new(&home, false));
         Runtime::init(
             home.clone(),
-            LoadedConfig { config: Config::default(), fault: None },
+            LoadedConfig {
+                config: Config::default(),
+                fault: None,
+            },
             mock.clone(),
             "ou_self".into(),
             Arc::new(AtomicBool::new(false)),
@@ -789,7 +921,10 @@ mod tests {
         let logger2 = Arc::new(Logger::new(&home, false));
         let rt2 = Runtime::init(
             home.clone(),
-            LoadedConfig { config: Config::default(), fault: None },
+            LoadedConfig {
+                config: Config::default(),
+                fault: None,
+            },
             mock.clone(),
             "ou_someone_else".into(),
             Arc::new(AtomicBool::new(false)),
@@ -814,7 +949,10 @@ mod tests {
         let logger = Arc::new(Logger::new(&home, false));
         let rt = Runtime::init(
             home.clone(),
-            LoadedConfig { config: Config::default(), fault: None },
+            LoadedConfig {
+                config: Config::default(),
+                fault: None,
+            },
             mock.clone(),
             "ou_self".into(),
             Arc::new(AtomicBool::new(false)),
@@ -841,7 +979,10 @@ mod tests {
         let logger = Arc::new(Logger::new(&home, false));
         let rt = Runtime::init(
             home.clone(),
-            LoadedConfig { config: Config::default(), fault },
+            LoadedConfig {
+                config: Config::default(),
+                fault,
+            },
             mock.clone(),
             "ou_self".into(),
             Arc::new(AtomicBool::new(false)),
@@ -856,18 +997,38 @@ mod tests {
     #[test]
     fn reply_rejected_and_uncertain_settle_without_resend() {
         for behavior in [
-            MockBehavior { reply_rejected: true, ..Default::default() },
-            MockBehavior { reply_uncertain: true, ..Default::default() },
+            MockBehavior {
+                reply_rejected: true,
+                ..Default::default()
+            },
+            MockBehavior {
+                reply_uncertain: true,
+                ..Default::default()
+            },
         ] {
             let rejected = behavior.reply_rejected;
             let now = now_ms();
             let boundary = now - 60_000;
-            let mut f = fixture_with(vec![mkmsg("om_r", boundary + 1_000, "ou_self", Some("/ping"), true, false)]);
+            let mut f = fixture_with(vec![mkmsg(
+                "om_r",
+                boundary + 1_000,
+                "ou_self",
+                Some("/ping"),
+                true,
+                false,
+            )]);
             f.behavior = behavior;
             let (rt, mock, home) = init_rt("replyfail", f, boundary);
             assert_eq!(rt.scan_once().unwrap(), 1);
             rt.process_job(Job {
-                message: mkmsg("om_r", boundary + 1_000, "ou_self", Some("/ping"), true, false),
+                message: mkmsg(
+                    "om_r",
+                    boundary + 1_000,
+                    "ou_self",
+                    Some("/ping"),
+                    true,
+                    false,
+                ),
                 route: rt.config.routes[0].clone(),
             });
             assert_eq!(mock.reply_records().len(), 0);
@@ -889,16 +1050,28 @@ mod tests {
     fn multiline_and_metacharacters_reach_worker_as_data() {
         let now = now_ms();
         let boundary = now - 60_000;
-        let msgs = vec![
-            mkmsg("om_ml", boundary + 1_000, "ou_self", Some("/ping keep\nthese\nlines"), true, false),
-        ];
+        let msgs = vec![mkmsg(
+            "om_ml",
+            boundary + 1_000,
+            "ou_self",
+            Some("/ping keep\nthese\nlines"),
+            true,
+            false,
+        )];
         let (rt, mock, home) = init_rt("multiline", fixture_with(msgs), boundary);
         assert_eq!(rt.scan_once().unwrap(), 1);
         // Route echoes its args back with markers.
         let mut rt = rt;
         rt.config.routes[0].cmd = "printf '[%s]' \"$SLASHIE_ARGS\"".into();
         rt.process_job(Job {
-            message: mkmsg("om_ml", boundary + 1_000, "ou_self", Some("/ping keep\nthese\nlines"), true, false),
+            message: mkmsg(
+                "om_ml",
+                boundary + 1_000,
+                "ou_self",
+                Some("/ping keep\nthese\nlines"),
+                true,
+                false,
+            ),
             route: rt.config.routes[0].clone(),
         });
         let recs = mock.reply_records();
@@ -918,7 +1091,10 @@ mod tests {
         let logger = Arc::new(Logger::new(&home, false));
         Runtime::init(
             home.clone(),
-            LoadedConfig { config: Config::default(), fault: None },
+            LoadedConfig {
+                config: Config::default(),
+                fault: None,
+            },
             mock.clone(),
             "ou_self".into(),
             Arc::new(AtomicBool::new(false)),
@@ -934,7 +1110,10 @@ mod tests {
         let logger2 = Arc::new(Logger::new(&home, false));
         Runtime::init(
             home.clone(),
-            LoadedConfig { config: Config::default(), fault: None },
+            LoadedConfig {
+                config: Config::default(),
+                fault: None,
+            },
             mock.clone(),
             "ou_self".into(),
             Arc::new(AtomicBool::new(false)),
@@ -954,7 +1133,14 @@ mod tests {
     fn group_shaped_messages_are_eligible_like_p2p() {
         let now = now_ms();
         let boundary = now - 60_000;
-        let mut m = mkmsg("om_grp", boundary + 1_000, "ou_self", Some("/ping"), true, false);
+        let mut m = mkmsg(
+            "om_grp",
+            boundary + 1_000,
+            "ou_self",
+            Some("/ping"),
+            true,
+            false,
+        );
         m.chat_type = "group".into();
         let (rt, _mock, _home) = init_rt("group", fixture_with(vec![m]), boundary);
         assert_eq!(rt.scan_once().unwrap(), 1);
@@ -962,7 +1148,11 @@ mod tests {
 
     #[test]
     fn reply_error_display_distinguishes_uncertain() {
-        assert!(ReplyError::Uncertain("x".into()).to_string().contains("uncertain"));
-        assert!(ReplyError::Rejected("x".into()).to_string().contains("rejected"));
+        assert!(ReplyError::Uncertain("x".into())
+            .to_string()
+            .contains("uncertain"));
+        assert!(ReplyError::Rejected("x".into())
+            .to_string()
+            .contains("rejected"));
     }
 }

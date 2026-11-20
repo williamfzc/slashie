@@ -107,13 +107,14 @@ impl LarkCliTransport {
             cmd.process_group(0);
         }
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| CliFailure::Failed(format!("cannot spawn lark-cli: {}", e), String::new()))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            CliFailure::Failed(format!("cannot spawn lark-cli: {}", e), String::new())
+        })?;
         let pgid = child.id() as i32;
         if let Some(data) = stdin_data {
             use std::io::Write;
-            child.stdin
+            child
+                .stdin
                 .take()
                 .unwrap()
                 .write_all(data.as_bytes())
@@ -210,10 +211,9 @@ impl LarkCliTransport {
 
     fn run_json(&self, args: &[&str], stdin_data: Option<&str>) -> Result<Value, CliFailure> {
         let out = self.run(args, stdin_data)?;
-        serde_json::from_str(&out).map_err(|e| CliFailure::Failed(format!(
-            "unparsable lark-cli output: {}",
-            e
-        ), String::new()))
+        serde_json::from_str(&out).map_err(|e| {
+            CliFailure::Failed(format!("unparsable lark-cli output: {}", e), String::new())
+        })
     }
 
     /// Verify the user identity is available and return its open_id.
@@ -236,9 +236,8 @@ impl LarkCliTransport {
             .run_json(&["contact", "+get-user", "--as", "user"], None)
             .map_err(cli_failure_to_transport)?;
         let data = api_data(&me)?;
-        let open_id = extract_open_id(data).ok_or_else(|| {
-            TransportError::Fatal("identity response has no open_id".into())
-        })?;
+        let open_id = extract_open_id(data)
+            .ok_or_else(|| TransportError::Fatal("identity response has no open_id".into()))?;
         Ok(open_id.to_string())
     }
 }
@@ -332,9 +331,9 @@ fn api_data(envelope: &Value) -> Result<&Value, TransportError> {
 
 fn classify_cli_error(etype: &str, message: &str) -> TransportError {
     match etype {
-        "auth" | "permission" | "validation" | "invalid_argument" => TransportError::Fatal(
-            format!("lark-cli {} error: {}", etype, message),
-        ),
+        "auth" | "permission" | "validation" | "invalid_argument" => {
+            TransportError::Fatal(format!("lark-cli {} error: {}", etype, message))
+        }
         _ => TransportError::Transient(format!("lark-cli {} error: {}", etype, message)),
     }
 }
@@ -342,10 +341,9 @@ fn classify_cli_error(etype: &str, message: &str) -> TransportError {
 fn classify_api_code(code: i64, message: &str) -> TransportError {
     match code {
         // Rate limited; honor a server delay if supplied (polling loop backoff).
-        99991400..=99991499 => TransportError::Transient(format!(
-            "rate limited (code {}): {}",
-            code, message
-        )),
+        99991400..=99991499 => {
+            TransportError::Transient(format!("rate limited (code {}): {}", code, message))
+        }
         // Authentication / permission faults need operator action.
         99991661..=99991699 => {
             TransportError::Fatal(format!("auth fault (code {}): {}", code, message))
@@ -399,10 +397,7 @@ fn parse_item(item: &Value) -> Result<Message, String> {
         None
     };
     let root = item.get("root_id").and_then(|v| v.as_str()).unwrap_or("");
-    let parent = item
-        .get("parent_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let parent = item.get("parent_id").and_then(|v| v.as_str()).unwrap_or("");
     let chat_type = item
         .get("chat_type")
         .and_then(|v| v.as_str())
@@ -433,9 +428,7 @@ impl Transport for LarkCliTransport {
                 .lock()
                 .unwrap()
                 .clone()
-                .ok_or_else(|| {
-                    TransportError::Fatal("search before identity binding".into())
-                })?
+                .ok_or_else(|| TransportError::Fatal("search before identity binding".into()))?
         };
         let mut ids = Vec::new();
         let mut page_token: Option<String> = None;
@@ -459,21 +452,22 @@ impl Transport for LarkCliTransport {
             if let Some(token) = &page_token {
                 params["page_token"] = json!(token);
             }
-            let envelope = self.run_json(
-                &[
-                    "api",
-                    "POST",
-                    "/open-apis/im/v1/messages/search",
-                    "--as",
-                    "user",
-                    "--params",
-                    &params.to_string(),
-                    "--data",
-                    "-",
-                ],
-                Some(&body.to_string()),
-            )
-            .map_err(cli_failure_to_transport)?;
+            let envelope = self
+                .run_json(
+                    &[
+                        "api",
+                        "POST",
+                        "/open-apis/im/v1/messages/search",
+                        "--as",
+                        "user",
+                        "--params",
+                        &params.to_string(),
+                        "--data",
+                        "-",
+                    ],
+                    Some(&body.to_string()),
+                )
+                .map_err(cli_failure_to_transport)?;
             let data = api_data(&envelope)?;
             for item in data
                 .get("items")
@@ -516,19 +510,20 @@ impl Transport for LarkCliTransport {
         let mut out = Vec::new();
         for batch in ids.chunks(MGET_BATCH) {
             let params = json!({ "message_ids": batch });
-            let envelope = self.run_json(
-                &[
-                    "api",
-                    "GET",
-                    "/open-apis/im/v1/messages/mget",
-                    "--as",
-                    "user",
-                    "--params",
-                    "-",
-                ],
-                Some(&params.to_string()),
-            )
-            .map_err(cli_failure_to_transport)?;
+            let envelope = self
+                .run_json(
+                    &[
+                        "api",
+                        "GET",
+                        "/open-apis/im/v1/messages/mget",
+                        "--as",
+                        "user",
+                        "--params",
+                        "-",
+                    ],
+                    Some(&params.to_string()),
+                )
+                .map_err(cli_failure_to_transport)?;
             let data = api_data(&envelope)?;
             let items = data
                 .get("items")
@@ -574,9 +569,8 @@ impl Transport for LarkCliTransport {
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         match self.run(&arg_refs, None) {
             Ok(out) => {
-                let envelope: Value = serde_json::from_str(&out).map_err(|_| {
-                    ReplyError::Uncertain("unparsable reply envelope".into())
-                })?;
+                let envelope: Value = serde_json::from_str(&out)
+                    .map_err(|_| ReplyError::Uncertain("unparsable reply envelope".into()))?;
                 // A definitive API rejection arrives as a clean envelope.
                 if envelope.get("ok") == Some(&json!(false)) {
                     let message = envelope
@@ -589,12 +583,12 @@ impl Transport for LarkCliTransport {
                     // Envelope trouble after a clean exit: outcome unknown.
                     ReplyError::Uncertain(e.to_string())
                 })?;
-                let reply_id = data
-                    .get("message_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        ReplyError::Uncertain("reply envelope has no message_id".into())
-                    })?;
+                let reply_id =
+                    data.get("message_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            ReplyError::Uncertain("reply envelope has no message_id".into())
+                        })?;
                 Ok(reply_id.to_string())
             }
             Err(failure @ CliFailure::Failed(..)) => {
@@ -794,7 +788,11 @@ sys.exit(0)
         d
     }
 
-    fn search_ok(t: &LarkCliTransport, from_ms: i64, to_ms: i64) -> Result<Vec<String>, TransportError> {
+    fn search_ok(
+        t: &LarkCliTransport,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<String>, TransportError> {
         t.search(from_ms, to_ms)
     }
 
@@ -809,8 +807,7 @@ sys.exit(0)
     #[test]
     fn open_id_extraction_accepts_nested_and_flat_shapes() {
         // Live-verified 1.0.68 shape.
-        let nested: Value =
-            serde_json::from_str(r#"{"user": {"open_id": "ou_nested"}}"#).unwrap();
+        let nested: Value = serde_json::from_str(r#"{"user": {"open_id": "ou_nested"}}"#).unwrap();
         assert_eq!(extract_open_id(&nested), Some("ou_nested"));
         // Flat shape stays accepted.
         let flat: Value = serde_json::from_str(r#"{"open_id": "ou_flat"}"#).unwrap();
@@ -967,7 +964,11 @@ sys.exit(0)
                 "got: {}",
                 stdout
             );
-            assert!(stdout.contains("slashie-om_dryrun_target"), "got: {}", stdout);
+            assert!(
+                stdout.contains("slashie-om_dryrun_target"),
+                "got: {}",
+                stdout
+            );
         } else {
             // Scope check reached after argv parsing; the envelope must be
             // a clean CLI error, not a usage failure.
