@@ -20,6 +20,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Documentation structure
+        run: python3 scripts/check_docs.py
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy (strict)
