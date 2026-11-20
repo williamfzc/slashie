@@ -115,6 +115,19 @@
     .empty-row { color: var(--secondary); padding: 10px 6px; text-align: left; }
     details { margin-top: 9px; color: var(--secondary); font-size: 12px; }
     details p { margin: 6px 0 0 13px; }
+    .copy-result { color: var(--secondary); }
+    .copy-result.failed { color: var(--error); }
+    details pre {
+      margin: 6px 0 0 13px;
+      padding: 8px;
+      background: var(--background);
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      font: 11px/16px ui-monospace, Menlo, monospace;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      user-select: all;
+    }
     footer {
       display: flex;
       justify-content: space-between;
@@ -187,6 +200,15 @@
               </tbody>
             </table>
           </div>
+          <details class="agent-help">
+            <summary>Configure with an agent</summary>
+            <p>Any local agent can edit these routes for you with the slashie CLI while Slashie runs. Review its changes, then restart to apply them.</p>
+            <p>
+              <button id="copy-agent-prompt" type="button">Copy agent prompt</button>
+              <span id="copy-result" class="copy-result" role="status"></span>
+            </p>
+            <pre id="agent-example"></pre>
+          </details>
         </section>
       </fieldset>
 
@@ -227,11 +249,15 @@
     const save = document.getElementById("save");
     const status = document.getElementById("status");
     const error = document.getElementById("error");
+    const agentExample = document.getElementById("agent-example");
+    const copyAgentPrompt = document.getElementById("copy-agent-prompt");
+    const copyResult = document.getElementById("copy-result");
 
     let snapshot = null;
     let baseline = "";
     let busy = false;
     let nextRouteId = 0;
+    let cliPath = "";
 
     function routeRow(prefix, cmd) {
       const row = routes.insertRow();
@@ -325,6 +351,9 @@
       if (typeof invoke !== "function") throw new Error("The app connection is unavailable.");
       const settings = await invoke("get_settings");
       openLog.disabled = !settings.log_available;
+      cliPath = typeof settings.cli_path === "string" ? settings.cli_path : "";
+      agentExample.textContent =
+        `${cliPath || "slashie"} route add /deploy --cmd 'cd ~/app && ./deploy.sh "$SLASHIE_ARGS"' --timeout 120`;
       if (settings.config_unparsable) {
         throw new Error(`Repair the configuration at ${settings.config_path}, then reopen Settings.`);
       }
@@ -341,6 +370,54 @@
         // Diagnostics must never change the window's behavior.
       }
     }
+
+    // The agent-guidance prompt (menu-bar.md "Settings"): a fixed template
+    // naming the running CLI path and the route subcommands.
+    function agentPrompt() {
+      const cli = cliPath || "slashie";
+      return [
+        "You can configure my Slashie routes. Slashie runs slash commands from Feishu on this machine.",
+        "Ask me what I want to automate before changing anything, then work within these rules:",
+        `- Read the current routes: \`${cli} route list\` (prints JSON).`,
+        `- Add a route: \`${cli} route add <PREFIX> --cmd <COMMAND> [--dir <PATH>] [--timeout <SECS>] [--session chat]\`.`,
+        "- PREFIX is a unique slash token like /deploy. COMMAND is the shell program; it receives the message text in $SLASHIE_ARGS and $SLASHIE_PROMPT. Quote inputs where the command expects them.",
+        "- --session chat keeps one agent session per conversation and cannot combine with --dir.",
+        `- Remove a route: \`${cli} route remove <PREFIX>\`.`,
+        "Show me the final route list, remind me to restart Slashie to apply it, and never edit config.json directly.",
+      ].join("\n");
+    }
+
+    async function copyText(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch {
+        // WKWebView can reject the async clipboard API; fall back.
+        const holder = document.createElement("textarea");
+        holder.value = text;
+        holder.setAttribute("readonly", "");
+        document.body.append(holder);
+        holder.select();
+        let copied = false;
+        try {
+          copied = document.execCommand("copy");
+        } catch {
+          copied = false;
+        }
+        holder.remove();
+        return copied;
+      }
+    }
+
+    copyAgentPrompt.onclick = async () => {
+      const prompt = agentPrompt();
+      const copied = await copyText(prompt);
+      copyResult.classList.toggle("failed", !copied);
+      copyResult.textContent = copied
+        ? "Copied."
+        : "Could not copy. The prompt is shown below; select it.";
+      if (!copied) agentExample.textContent = prompt;
+    };
 
     async function load() {
       try {

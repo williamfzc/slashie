@@ -435,6 +435,8 @@ struct SettingsPayload {
     config_unparsable: bool,
     config_path: String,
     log_available: bool,
+    /// This binary, so the window can name the `route` subcommands' path.
+    cli_path: String,
 }
 
 #[tauri::command]
@@ -453,6 +455,9 @@ impl SettingsPayload {
             snapshot,
             config_path: path.display().to_string(),
             log_available: home.join("slashie.log").exists(),
+            cli_path: std::env::current_exe()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
         }
     }
 }

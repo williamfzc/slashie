@@ -62,6 +62,8 @@ Below Routes, show the two supported input forms: `"$SLASHIE_ARGS"` passes the t
 
 A route may set `"session": "chat"` in the configuration file to keep one agent session per conversation (chat or topic). The window preserves that option when it edits the route; the command uses `SLASHIE_CONTINUE` to choose between starting and resuming.
 
+Under the route list, a `Configure with an agent` disclosure guides hand-off to a local agent instead of hand-editing. It explains that any local agent can edit routes with the [slashie CLI](DESIGN.md#configuration-and-files) while the app runs, offers `Copy agent prompt` with a ready-made instruction — naming the resolved CLI path, `route list` / `route add` / `route remove`, the `SLASHIE_ARGS` and `SLASHIE_PROMPT` inputs, and a reminder to confirm changes and restart — and shows a copyable example command. The window never runs the agent itself; the user reviews whatever the agent changed.
+
 Save validates the entire draft. Mark invalid fields in place, including blank commands and duplicate prefixes. If the configuration file cannot be parsed, show its path and disable Save until the file is repaired. On success, keep the window open and show `Saved. Restart Slashie to apply.` Closing the window leaves saved settings intact and discards unsaved edits. Preserve per-route working directories and timeouts when editing existing rows. Lark CLI and subprocess path options stay in the [shared configuration file](DESIGN.md#configuration-and-files).
 
 ## Acceptance
@@ -73,4 +75,5 @@ Save validates the entire draft. Mark invalid fields in place, including blank c
 - Turn polling off during a command and verify the [pause behavior](product.md#pause-and-recovery). Exercise backoff, failed setting writes, and an uncertain reply. Confirm normal states use the checkmark alone.
 - Open Settings while polling and verify the runtime status line shows the interval and scan age, switches to the breathing dot while a scan runs, and shows the paused copy when polling is off. Verify it carries the status-line copy during a fault, and that the dot does not animate when reduced motion is set.
 - Open Settings twice. Change the interval and add a route, then save and restart. Test both input forms with multiline text. Reject a duplicate prefix and verify that existing route options survive edits. Confirm that the log opens from Settings.
+- Open `Configure with an agent`, copy the prompt, and verify the pasted text names the running binary path and the route subcommands. Verify the example command line reflects the same path, that copying leaves the save state untouched, and that a blocked clipboard falls back to showing the prompt text for manual selection.
 - Quit during a command and verify cleanup before another instance can start. Launch from Finder while headless holds the lock and verify the startup alert.
