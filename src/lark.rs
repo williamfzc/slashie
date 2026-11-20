@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const CALL_TIMEOUT_MS: u64 = 20_000;
+const REACTION_TIMEOUT_MS: u64 = 2_000;
 const SEARCH_PAGE_SIZE: i64 = 50;
 const MAX_PAGES: usize = 10;
 const MGET_BATCH: usize = 50;
@@ -37,7 +38,7 @@ pub struct LarkCliTransport {
     shutdown: Arc<AtomicBool>,
     /// Bound open_id, required for search's from_ids filter.
     self_id: std::sync::Mutex<Option<String>>,
-    /// Bounded deadline for every CLI call; tests shorten it.
+    /// Default CLI call deadline; tests shorten it.
     timeout_ms: u64,
 }
 
@@ -85,7 +86,12 @@ impl LarkCliTransport {
     }
 
     /// One bounded CLI invocation. Returns stdout on a clean exit.
-    fn run(&self, args: &[&str], stdin_data: Option<&str>) -> Result<String, CliFailure> {
+    fn run(
+        &self,
+        args: &[&str],
+        stdin_data: Option<&str>,
+        timeout_ms: u64,
+    ) -> Result<String, CliFailure> {
         let mut cmd = Command::new(&self.exe);
         // An empty profile means "use the CLI's default profile".
         if !self.profile.is_empty() {
@@ -142,7 +148,7 @@ impl LarkCliTransport {
             buf
         });
 
-        let deadline = std::time::Instant::now() + Duration::from_millis(self.timeout_ms);
+        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
         let status = loop {
             match child.try_wait() {
                 Ok(Some(st)) => break st,
@@ -161,7 +167,7 @@ impl LarkCliTransport {
                 let _ = child.wait();
                 return Err(CliFailure::Uncertain(format!(
                     "lark-cli call exceeded {}ms deadline",
-                    self.timeout_ms
+                    timeout_ms
                 )));
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -209,8 +215,13 @@ impl LarkCliTransport {
         }
     }
 
-    fn run_json(&self, args: &[&str], stdin_data: Option<&str>) -> Result<Value, CliFailure> {
-        let out = self.run(args, stdin_data)?;
+    fn run_json(
+        &self,
+        args: &[&str],
+        stdin_data: Option<&str>,
+        timeout_ms: u64,
+    ) -> Result<Value, CliFailure> {
+        let out = self.run(args, stdin_data, timeout_ms)?;
         serde_json::from_str(&out).map_err(|e| {
             CliFailure::Failed(format!("unparsable lark-cli output: {}", e), String::new())
         })
@@ -220,7 +231,7 @@ impl LarkCliTransport {
     /// A missing user login requires operator action (DESIGN.md).
     pub fn verify_identity(&self) -> Result<String, TransportError> {
         let status = self
-            .run_json(&["auth", "status", "--json"], None)
+            .run_json(&["auth", "status", "--json"], None, self.timeout_ms)
             .map_err(cli_failure_to_transport)?;
         let user_ready = status
             .pointer("/identities/user/status")
@@ -233,7 +244,11 @@ impl LarkCliTransport {
             ));
         }
         let me = self
-            .run_json(&["contact", "+get-user", "--as", "user"], None)
+            .run_json(
+                &["contact", "+get-user", "--as", "user"],
+                None,
+                self.timeout_ms,
+            )
             .map_err(cli_failure_to_transport)?;
         let data = api_data(&me)?;
         let open_id = extract_open_id(data)
@@ -282,7 +297,7 @@ impl std::fmt::Debug for CliFailure {
     }
 }
 
-/// Map a CLI failure on a read path (search/mget/identity).
+/// Map a CLI failure for an operation without reply delivery tracking.
 fn cli_failure_to_transport(f: CliFailure) -> TransportError {
     match f {
         CliFailure::Failed(m, _) => TransportError::Transient(m),
@@ -466,6 +481,7 @@ impl Transport for LarkCliTransport {
                         "-",
                     ],
                     Some(&body.to_string()),
+                    self.timeout_ms,
                 )
                 .map_err(cli_failure_to_transport)?;
             let data = api_data(&envelope)?;
@@ -522,6 +538,7 @@ impl Transport for LarkCliTransport {
                         "-",
                     ],
                     Some(&params.to_string()),
+                    self.timeout_ms,
                 )
                 .map_err(cli_failure_to_transport)?;
             let data = api_data(&envelope)?;
@@ -552,6 +569,29 @@ impl Transport for LarkCliTransport {
         Ok(out)
     }
 
+    fn react_processing(&self, source_id: &str) -> Result<(), TransportError> {
+        let params = json!({ "message_id": source_id });
+        let body = json!({ "reaction_type": { "emoji_type": "OnIt" } });
+        let envelope = self
+            .run_json(
+                &[
+                    "im",
+                    "reactions",
+                    "create",
+                    "--as",
+                    "user",
+                    "--params",
+                    &params.to_string(),
+                    "--data",
+                    "-",
+                ],
+                Some(&body.to_string()),
+                REACTION_TIMEOUT_MS,
+            )
+            .map_err(cli_failure_to_transport)?;
+        api_data(&envelope).map(|_| ())
+    }
+
     fn reply(&self, source_id: &str, text: &str) -> Result<String, ReplyError> {
         let idempotency_key = format!("slashie-{}", source_id);
         let args = vec![
@@ -567,7 +607,7 @@ impl Transport for LarkCliTransport {
             idempotency_key,
         ];
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        match self.run(&arg_refs, None) {
+        match self.run(&arg_refs, None, self.timeout_ms) {
             Ok(out) => {
                 let envelope: Value = serde_json::from_str(&out)
                     .map_err(|_| ReplyError::Uncertain("unparsable reply envelope".into()))?;
@@ -738,6 +778,15 @@ if args[:3] == ["api", "GET", "/open-apis/im/v1/messages/mget"]:
     print(json.dumps({"code": 0, "msg": "ok", "data": {"items": items}}))
     sys.exit(0)
 
+if args[:3] == ["im", "reactions", "create"]:
+    assert profile == "reaction-test"
+    assert args[3:6] == ["--as", "user", "--params"]
+    assert json.loads(args[6]) == {"message_id": "om_reaction_source"}
+    assert args[7:] == ["--data", "-"]
+    assert stdin_arg("--data") == {"reaction_type": {"emoji_type": "OnIt"}}
+    print(json.dumps({"ok": True, "identity": "user", "data": {"reaction_id": "reaction_test"}}))
+    sys.exit(0)
+
 if args[:1] == ["im"] and "+messages-reply" in args:
     mid = args[args.index("--message-id") + 1]
     if mid == "om_hang":
@@ -800,6 +849,14 @@ sys.exit(0)
         let dir = tmp("identity");
         let t = transport_in(&dir, "test");
         assert_eq!(t.verify_identity().unwrap(), "ou_verified");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn processing_reaction_targets_source_as_user() {
+        let dir = tmp("reaction");
+        let t = transport_in(&dir, "reaction-test");
+        t.react_processing("om_reaction_source").unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

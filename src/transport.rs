@@ -1,7 +1,5 @@
-//! Feishu transport abstraction. The real Lark CLI adapter is follow-up scope;
-//! this slice uses a mock transport driven by an injectable fixture, so the
-//! runtime logic can be verified without any live Feishu access (see the
-//! approved acceptance slice).
+//! Feishu operations consumed by the runtime and a fixture-backed transport
+//! for verification without live Feishu access.
 
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +70,9 @@ pub trait Transport: Send + Sync {
     /// Fetch details for the given IDs. Missing IDs mean an incomplete result.
     fn mget(&self, ids: &[String]) -> Result<Vec<Message>, TransportError>;
 
+    /// One best-effort processing reaction targeting the claimed message.
+    fn react_processing(&self, source_id: &str) -> Result<(), TransportError>;
+
     /// One reply attempt targeting the source message. Returns the reply ID
     /// on confirmed success.
     fn reply(&self, source_id: &str, text: &str) -> Result<String, ReplyError>;
@@ -102,6 +103,8 @@ pub struct MockBehavior {
     /// Make mget drop these IDs (incomplete result -> scan blocked).
     #[serde(default)]
     pub mget_missing_ids: Vec<String>,
+    #[serde(default)]
+    pub reaction_rejected: bool,
     /// Make every reply fail definitively.
     #[serde(default)]
     pub reply_rejected: bool,
@@ -113,6 +116,7 @@ pub struct MockBehavior {
 pub struct MockTransport {
     fixture: MockFixture,
     search_failures_left: std::sync::atomic::AtomicU32,
+    pub reaction_attempts: std::sync::Mutex<Vec<String>>,
     pub replies: std::sync::Mutex<Vec<ReplyRecord>>,
     next_reply_id: std::sync::atomic::AtomicU32,
 }
@@ -123,6 +127,7 @@ impl MockTransport {
         MockTransport {
             fixture,
             search_failures_left: std::sync::atomic::AtomicU32::new(left),
+            reaction_attempts: std::sync::Mutex::new(Vec::new()),
             replies: std::sync::Mutex::new(Vec::new()),
             next_reply_id: std::sync::atomic::AtomicU32::new(1),
         }
@@ -189,6 +194,17 @@ impl Transport for MockTransport {
             }
         }
         Ok(out)
+    }
+
+    fn react_processing(&self, source_id: &str) -> Result<(), TransportError> {
+        self.reaction_attempts
+            .lock()
+            .unwrap()
+            .push(source_id.into());
+        if self.fixture.behavior.reaction_rejected {
+            return Err(TransportError::Fatal("mock reaction rejection".into()));
+        }
+        Ok(())
     }
 
     fn reply(&self, source_id: &str, text: &str) -> Result<String, ReplyError> {

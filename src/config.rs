@@ -49,12 +49,29 @@ impl Default for Config {
             lark_cli: None,
             process_path: DEFAULT_PROCESS_PATH.iter().map(|s| s.to_string()).collect(),
             poll_interval: DEFAULT_POLL_INTERVAL,
-            routes: vec![Route {
-                prefix: "/ping".to_string(),
-                cmd: "echo pong".to_string(),
+            routes: [
+                ("/ping", "echo pong", None),
+                // Pi treats positional inputs starting with `@` as attachments.
+                (
+                    "/pi",
+                    r#"printf '%s' "$SLASHIE_PROMPT" | if command -v pi-real >/dev/null 2>&1; then pi-real -p; else pi -p; fi"#,
+                    Some(120),
+                ),
+                ("/claude", r#"claude -p -- "$SLASHIE_PROMPT""#, Some(120)),
+                (
+                    "/codex",
+                    r#"codex exec --skip-git-repo-check -- "$SLASHIE_PROMPT""#,
+                    Some(120),
+                ),
+            ]
+            .into_iter()
+            .map(|(prefix, cmd, timeout)| Route {
+                prefix: prefix.into(),
+                cmd: cmd.into(),
                 dir: None,
-                timeout: None,
-            }],
+                timeout,
+            })
+            .collect(),
         }
     }
 }
@@ -144,7 +161,7 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Load config.json, creating the default (fixed /ping) on a new
+    /// Load config.json, creating the default route presets on a new
     /// installation. Returns the config plus any fault for intake blocking.
     pub fn load_or_create(
         home: &std::path::Path,
@@ -190,13 +207,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_is_valid_and_has_ping() {
+    fn default_config_is_valid_and_has_route_presets() {
         let cfg = Config::default();
         validate(&cfg).unwrap();
-        assert_eq!(cfg.routes.len(), 1);
-        assert_eq!(cfg.routes[0].prefix, "/ping");
+        let prefixes: Vec<_> = cfg
+            .routes
+            .iter()
+            .map(|route| route.prefix.as_str())
+            .collect();
+        assert_eq!(prefixes, ["/ping", "/pi", "/claude", "/codex"]);
         assert_eq!(cfg.routes[0].cmd, "echo pong");
         assert_eq!(cfg.poll_interval, 20);
+    }
+
+    #[test]
+    fn creates_presets_only_when_config_is_missing() {
+        let home = std::env::temp_dir().join(format!("slashie-config-{}", std::process::id()));
+        std::fs::create_dir(&home).unwrap();
+        let path = home.join("config.json");
+
+        let (created, fault) = Config::load_or_create(&home).unwrap();
+        assert_eq!(fault, None);
+        assert_eq!(created, Config::default());
+        assert_eq!(
+            Config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap(),
+            created
+        );
+
+        let original = r#"{"poll_interval":20,"routes":[{"prefix":"/pi","cmd":"echo custom"}]}"#;
+        std::fs::write(&path, original).unwrap();
+        let (cfg, fault) = Config::load_or_create(&home).unwrap();
+        assert_eq!(fault, None);
+        assert_eq!(cfg.routes.len(), 1);
+        assert_eq!(cfg.routes[0].prefix, "/pi");
+        assert_eq!(cfg.routes[0].cmd, "echo custom");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
+        let empty = r#"{"poll_interval":20,"routes":[]}"#;
+        std::fs::write(&path, empty).unwrap();
+        let (cfg, fault) = Config::load_or_create(&home).unwrap();
+        assert_eq!(fault, None);
+        assert!(cfg.routes.is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), empty);
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

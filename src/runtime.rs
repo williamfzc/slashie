@@ -190,15 +190,23 @@ impl Runtime {
     /// Err when the write failed so the menu can restore its checkmark.
     pub fn apply_poll_setting(&self, on: bool) -> Result<(), ()> {
         {
+            let mut status = self.status.lock().unwrap();
             let mut st = self.state.lock().unwrap();
             if st.polling != on {
                 st.polling = on;
                 if let Err(e) = save(&self.home, &st) {
+                    st.polling = !on;
                     self.logger
                         .log(&format!("ERROR cannot save polling setting: {}", e));
-                    self.status.lock().unwrap().operator_action =
+                    status.operator_action =
                         Some(crate::status::OperatorFault::CouldNotSavePollingSetting);
                     return Err(());
+                }
+                status.last_successful_scan = None;
+                if status.operator_action
+                    == Some(crate::status::OperatorFault::CouldNotSavePollingSetting)
+                {
+                    status.operator_action = None;
                 }
                 self.logger
                     .log(&format!("polling set to {}", if on { "on" } else { "off" }));
@@ -233,6 +241,7 @@ impl Runtime {
     /// order (message ID tiebreaker), durably claiming before handoff.
     /// Returns the number of newly claimed messages.
     pub fn scan_once(&self) -> Result<usize, String> {
+        self.status.lock().unwrap().last_successful_scan = None;
         if self.shutdown.load(Ordering::SeqCst) || self.is_intake_blocked() {
             return Ok(0);
         }
@@ -333,7 +342,10 @@ impl Runtime {
             {
                 let mut st = self.state.lock().unwrap();
                 // Pause invalidates results from a scan already in flight.
-                if !st.polling || self.shutdown.load(Ordering::SeqCst) {
+                if !st.polling
+                    || self.shutdown.load(Ordering::SeqCst)
+                    || *self.resume_boundary_ms.lock().unwrap() != boundary
+                {
                     self.logger
                         .log("scan results invalidated by pause or shutdown");
                     break;
@@ -363,7 +375,7 @@ impl Runtime {
         // Complete scan: advance the pruning cutoff and prune settled claims
         // that have left the scan horizon.
         {
-            self.status.lock().unwrap().retrying = None;
+            let mut status = self.status.lock().unwrap();
             let mut st = self.state.lock().unwrap();
             st.advance_cutoff(end);
             let horizon = end - LOOKBACK_MS;
@@ -374,13 +386,27 @@ impl Runtime {
             if let Err(e) = save(&self.home, &st) {
                 self.logger
                     .log(&format!("ERROR cannot persist pruning cutoff: {}", e));
+            } else if st.polling
+                && !self.shutdown.load(Ordering::SeqCst)
+                && *self.resume_boundary_ms.lock().unwrap() == boundary
+            {
+                status.retrying = None;
+                status.last_successful_scan = Some(std::time::Instant::now());
             }
         }
         Ok(claimed)
     }
 
-    /// Run one job to completion: command, one reply attempt, durable settle.
+    /// Run one job to completion: processing reaction, command, reply, settle.
     pub fn process_job(&self, job: Job) {
+        if !self.shutdown.load(Ordering::SeqCst) {
+            if let Err(e) = self.transport.react_processing(&job.message.id) {
+                self.logger.log(&format!(
+                    "processing reaction failed for {}: {}",
+                    job.message.id, e
+                ));
+            }
+        }
         let (args, prompt) = build_inputs(&job.route.prefix, &job.message);
         let timeout_secs = job.route.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS);
         let outcome = run_command(
@@ -754,6 +780,7 @@ mod tests {
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].source_id, "om_once");
         assert_eq!(recs[0].text, "pong");
+        assert_eq!(*mock.reaction_attempts.lock().unwrap(), ["om_once"]);
         // Claim settled; a restart-like rescan never re-runs it.
         let st = match load_or_init(&home).unwrap() {
             StateLoad::Loaded(s) => s,
@@ -763,6 +790,33 @@ mod tests {
         assert_eq!(st.claims[0].outcome.as_deref(), Some("exit:reply_sent"));
         assert_eq!(rt.scan_once().unwrap(), 0);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn rejected_processing_reaction_still_runs_and_replies() {
+        let boundary = now_ms() - 60_000;
+        let m = mkmsg(
+            "om_reaction",
+            boundary + 1000,
+            "ou_self",
+            Some("/ping"),
+            true,
+            false,
+        );
+        let mut fixture = fixture_with(vec![m.clone()]);
+        fixture.behavior.reaction_rejected = true;
+        let (rt, mock, home) = init_rt("rejected_reaction", fixture, boundary);
+        assert_eq!(rt.scan_once().unwrap(), 1);
+        assert!(rt.status.lock().unwrap().last_successful_scan.is_some());
+        rt.process_job(Job {
+            message: m,
+            route: rt.config.routes[0].clone(),
+        });
+        assert_eq!(*mock.reaction_attempts.lock().unwrap(), ["om_reaction"]);
+        assert_eq!(mock.reply_records()[0].text, "pong");
+        rt.apply_poll_setting(false).unwrap();
+        assert!(rt.status.lock().unwrap().last_successful_scan.is_none());
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]
@@ -885,6 +939,8 @@ mod tests {
         f.behavior.mget_missing_ids = vec!["om_blk".into()];
         let (rt, mock, home) = init_rt("incomplete", f, boundary);
         assert_eq!(rt.scan_once().unwrap(), 0);
+        assert!(rt.status.lock().unwrap().last_successful_scan.is_none());
+        assert!(mock.reaction_attempts.lock().unwrap().is_empty());
         let st = match load_or_init(&home).unwrap() {
             StateLoad::Loaded(s) => s,
             _ => panic!(),

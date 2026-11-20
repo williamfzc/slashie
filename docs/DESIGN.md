@@ -47,6 +47,7 @@ Use `--as user` and the configured Lark CLI profile. An empty profile uses the C
 | Search | Call raw `POST /open-apis/im/v1/messages/search` with `filter.from_ids` and whole-second RFC 3339 `filter.time_range.start_time` and `end_time`. Round the start down and the end up. Pass `page_size` and `page_token` in the query string. Read IDs from `data.items[].meta_data.message_id` and follow `has_more`. Use one strategy that passes recall tests in the release account. Try a sender-and-time search with an empty query first, then test configured-prefix queries if needed. |
 | Read details | Batch up to 50 IDs through raw `GET /open-apis/im/v1/messages/mget`. Decode `body.content`, verify sender and creation time locally, and use the verified meanings of `root_id` and `parent_id` to admit original messages only. Validate the response shape and skip unclassifiable placement. |
 | Source | Use a verified message link if available, then a conversation link if available. Always include the message ID. |
+| Processing reaction | Call `im reactions create --as user` with the original message ID and `OnIt`. The serial worker makes one bounded attempt immediately before launching the command, after durable admission. The reaction requires `im:message.reactions:write_only`. Its failure does not affect execution or reply delivery. |
 | Reply | Call `im +messages-reply --as user` with the source message ID, literal text, verified placement, and an idempotency key derived from the source ID. Use one adapter attempt. A confirmed reply returns a reply ID. Distinguish definitive rejection from uncertain delivery. |
 
 The search shortcut projects out placement fields and can report successful exit with IDs only if detail retrieval fails. Use the raw adapter and validate the CLI envelope and required fields. An incomplete result or missing page blocks admission from that scan. Release requires live tests for search recall, original versus reply classification, reply placement, timestamps, permissions, and text that resembles mentions. [Pinned CLI search](https://github.com/larksuite/cli/blob/v1.0.68/shortcuts/im/im_messages_search.go) · [Pinned CLI conversion](https://github.com/larksuite/cli/blob/v1.0.68/shortcuts/im/convert_lib/content_convert.go) · [Lark CLI reply reference](https://github.com/larksuite/cli/blob/main/skills/lark-im/references/lark-im-messages-reply.md)
@@ -69,7 +70,7 @@ Drain stdout and stderr concurrently and keep at most 64 KiB of each in memory. 
 
 ## Configuration and files
 
-Read and validate configuration once at launch. Configure the Lark CLI executable and optional profile. Give both hosts the same subprocess `PATH`. Add the Node directory if the installed Lark CLI is an npm wrapper. On a new installation, create a configuration with `/ping` and initialize state with polling paused. [Tauri bundle environment](https://v2.tauri.app/distribute/macos-application-bundle/) · [Lark CLI npm entry point](https://github.com/larksuite/cli/blob/main/package.json)
+Read and validate configuration once at launch. Configure the Lark CLI executable and optional profile. Give both hosts the same subprocess `PATH`. Add the Node directory if the installed Lark CLI is an npm wrapper. [Tauri bundle environment](https://v2.tauri.app/distribute/macos-application-bundle/) · [Lark CLI npm entry point](https://github.com/larksuite/cli/blob/main/package.json)
 
 ```json
 {
@@ -81,6 +82,8 @@ Read and validate configuration once at launch. Configure the Lark CLI executabl
   ]
 }
 ```
+
+On initial setup, the stock configuration includes `/ping` (replies `pong`), `/pi` (Pi), `/claude` (Claude Code), and `/codex` (Codex). These are editable routes. Start with polling paused. Put the installed tools and any required runtime, such as Node, in `process_path`. The agent routes forward the question and source metadata. Reading conversation history requires a separate context tool.
 
 `poll_interval` is 10, 20, 30, or 60 seconds and defaults to 20. Each prefix is a unique slash-prefixed token. Each `cmd` is a nonempty shell program. An optional route `dir` is an absolute path or starts with `~/`. It defaults to the user's home directory. An optional `timeout` is a positive integer in seconds, defaulting to 30. `process_path` contains ordered absolute directories and defaults to the example.
 

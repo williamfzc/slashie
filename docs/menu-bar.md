@@ -10,7 +10,9 @@ Feishu carries requests and results. The menu bar controls polling, and Settings
 
 ## Status item and menu
 
-Use one fixed `/` template icon with the accessible name `Slashie`. macOS supplies its appearance and native menu behavior. A primary click or keyboard activation opens the menu. This is the enabled state:
+Use one fixed-size `/` template icon with the accessible name `Slashie`. macOS supplies its appearance and native menu behavior. A small dot briefly appears beside the slash after a complete, successful Feishu scan, including an empty scan. Startup, pause, scan failures, retries, and shutdown show the plain slash.
+
+A primary click or keyboard activation opens the menu. This is the enabled state:
 
 ```text
 ✓ Polling
@@ -54,6 +56,7 @@ Save validates the entire draft. Mark invalid fields in place, including blank c
 ## Acceptance
 
 - From Finder, check the native menu in light and dark appearances. Verify keyboard navigation, Escape dismissal, and VoiceOver reading `Polling` and its checked state.
+- With polling enabled, watch a successful scan with no matching requests. Verify that the dot appears briefly and leaves the icon and neighboring items in place. Verify the plain slash during pause, scan failure, and shutdown.
 - Turn polling off during a command and verify the [pause behavior](product.md#pause-and-recovery). Exercise backoff, failed setting writes, and an uncertain reply. Confirm normal states use the checkmark alone.
 - Open Settings twice. Change the interval and add a route, then save and restart. Test both input forms with multiline text. Reject a duplicate prefix and verify that existing route options survive edits. Confirm that the log opens from Settings.
 - Quit during a command and verify cleanup before another instance can start. Launch from Finder while headless holds the lock and verify the startup alert.

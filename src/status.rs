@@ -15,6 +15,9 @@ pub struct RuntimeStatus {
     pub finishing_accepted: bool,
     /// Polling is retrying a transient failure.
     pub retrying: Option<RetryKind>,
+    /// Monotonic time of the last complete scan for the menu-bar pulse.
+    #[serde(skip)]
+    pub last_successful_scan: Option<std::time::Instant>,
     /// Starting or shutting down.
     pub phase: Option<Phase>,
 }
@@ -97,6 +100,7 @@ mod tests {
             reply_unconfirmed: true,
             finishing_accepted: true,
             retrying: Some(RetryKind::RateLimited),
+            last_successful_scan: None,
         };
         assert_eq!(status_line(&s), Some("Quitting…"));
         s.phase = Some(Phase::Starting);

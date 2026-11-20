@@ -10,11 +10,12 @@ Send a slash command in Feishu. Slashie finds the message under an existing auth
 
 ## Trigger and reply
 
-1. The operator configures a route and enables polling. A new installation starts paused with a fixed `/ping` route that replies `pong`.
+1. The operator configures a route and enables polling. A new installation starts paused with [editable starter routes](DESIGN.md#configuration-and-files).
 2. The first whitespace-delimited token of a self-authored, searchable, top-level text message must match a configured prefix exactly. `/pingpong` does not match `/ping`. Multiline arguments keep their internal line breaks.
 3. Direct messages and ordinary groups are release targets. Replies, recalled messages, and non-text messages are ignored. Topic support requires its own evidence of root classification and reply placement.
 4. Routes can pass message arguments as one value, with or without source context. Context includes the message ID and an available message or conversation link.
-5. Slashie attempts one text reply targeting the original message. Success returns stdout, with a short acknowledgment for empty output. Failure or timeout returns the reason and available diagnostics. Long replies include a truncation notice. Slashie discards output beyond the excerpt.
+5. When an accepted request starts processing, Slashie attempts one Feishu `OnIt` reaction on the original message. A reaction failure is logged and processing continues.
+6. Slashie attempts one text reply targeting the original message. Success returns stdout, with a short acknowledgment for empty output. Failure or timeout returns the reason and available diagnostics. Long replies include a truncation notice. Slashie discards output beyond the excerpt.
 
 Enabling polling covers supported conversations visible to the authorized account. A group can see the reply. Route commands run with the local user's permissions. An agent may send request data to its provider according to its own configuration.
 
@@ -42,7 +43,7 @@ The `/pi` context reader was part of the test harness. The shipped route interfa
 
 | Case | Pass condition |
 | --- | --- |
-| Send `/ping` in a direct message and ordinary group. | One reply references the original message in each released surface. |
+| Send `/ping` in a direct message and ordinary group. | An `OnIt` reaction is attempted when processing starts. One reply references the original message in each released surface. |
 | Exercise both route input forms with multiline text and shell metacharacters. Send a near-prefix, another author's message, and a reply beginning with a command. | The selected input form arrives as one argument. Source context is included when requested. Message text cannot change the shell program, and ineligible messages never execute. |
 | Deliver duplicate and late-indexed results. Kill the process after a claim and during a reply attempt. | Eligible results inside the window run once. Claims survive restart and uncertain attempts appear in the log. Corrupt state blocks new work. |
 | Pause during a command, send messages while paused, resume, and restart. | Accepted work can finish during pause. Earlier messages remain outside every new activation window. |
