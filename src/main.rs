@@ -182,6 +182,9 @@ fn main() {
             return;
         }
         None => {
+            if let Some(fault) = &config_fault {
+                fail(&format!("config.json is invalid: {} (fix the file and restart)", fault));
+            }
             let cli = config.lark_cli.clone().unwrap_or_else(|| {
                 fail(
                     "config.json has no lark_cli section; set lark_cli.path and \

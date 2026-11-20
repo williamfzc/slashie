@@ -126,8 +126,10 @@ pub fn validate(cfg: &Config) -> Result<(), ConfigError> {
         if !Path::new(&cli.path).is_absolute() {
             return err("lark_cli.path must be an absolute path");
         }
-        if cli.profile.trim().is_empty() {
-            return err("lark_cli.profile must be nonempty");
+        // An empty profile means "use the CLI's default profile"; any other
+        // whitespace-only value is a mistake.
+        if !cli.profile.is_empty() && cli.profile.trim().is_empty() {
+            return err("lark_cli.profile must be nonempty or empty for the CLI default");
         }
     }
     Ok(())
@@ -249,6 +251,20 @@ mod tests {
         cfg.routes[0].dir = Some("~/work".into());
         validate(&cfg).unwrap();
         cfg.routes[0].timeout = Some(0);
+        assert!(validate(&cfg).is_err());
+    }
+
+    #[test]
+    fn empty_lark_profile_means_cli_default() {
+        let mut cfg = Config {
+            lark_cli: Some(LarkCli {
+                path: "/usr/local/bin/lark-cli".into(),
+                profile: "".into(),
+            }),
+            ..Config::default()
+        };
+        validate(&cfg).unwrap();
+        cfg.lark_cli.as_mut().unwrap().profile = "  ".into();
         assert!(validate(&cfg).is_err());
     }
 
