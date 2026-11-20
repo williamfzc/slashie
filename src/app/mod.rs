@@ -54,6 +54,11 @@ pub fn run(rt: Arc<Runtime>, shutdown: Arc<AtomicBool>) {
             report_settings
         ])
         .setup(|app| {
+            // A menu-bar app owns no Dock icon. The bundled Info.plist covers
+            // Finder launches; the accessory policy also covers unbundled dev
+            // runs (menu-bar.md).
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             build_tray(app.handle().clone())?;
             Ok(())
         })
