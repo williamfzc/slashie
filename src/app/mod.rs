@@ -22,9 +22,12 @@ use tauri::{
 /// empty one (menu-bar.md "Status item and menu").
 const SCAN_FLASH_DURATION: Duration = Duration::from_millis(1500);
 
-/// Sampling cadence of the tray thread; the classifier pairs consecutive
-/// samples so an in-flight scan breathes at about once a second.
+/// Sampling cadence of the tray thread while the icon is static.
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Frame cadence while a scan is in flight; eight spin frames at this rate
+/// make the dot orbit about once a second.
+const SPIN_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The menu-bar icon frames (menu-bar.md "Status item and menu").
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -35,12 +38,20 @@ enum Frame {
     Plain,
     /// Healthy polling between scans: the resting dim dot.
     DotIdle,
-    /// A scan in flight (breathing) or just completed (flash): the bright dot.
+    /// Just completed a scan: the bright dot.
     DotActive,
+    /// A scan in flight: the dot orbiting the slash, `SPIN_STEPS` per turn.
+    Spin(usize),
 }
 
+/// The spinner orbit sits in the clear triangle beside the slash tail
+/// (verified against the 32x32 template's alpha grid).
+const SPIN_STEPS: usize = 8;
+const SPIN_CENTER: (f64, f64) = (12.0, 25.0);
+const SPIN_RADIUS: f64 = 4.0;
+
 /// Classify the icon frame for the current runtime state. `tick` counts
-/// loop iterations (~250 ms) so an in-flight scan breathes at ~500 ms.
+/// loop iterations and advances the spinner while a scan is in flight.
 fn tray_frame(status: &RuntimeStatus, polling: bool, now: Instant, tick: u64) -> Frame {
     if !polling {
         return Frame::Dimmed;
@@ -49,11 +60,7 @@ fn tray_frame(status: &RuntimeStatus, polling: bool, now: Instant, tick: u64) ->
         return Frame::Plain;
     }
     if status.scanning {
-        return if (tick / 2).is_multiple_of(2) {
-            Frame::DotActive
-        } else {
-            Frame::DotIdle
-        };
+        return Frame::Spin((tick % SPIN_STEPS as u64) as usize);
     }
     if status
         .last_successful_scan
@@ -165,8 +172,9 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
     let icon = Image::from_bytes(include_bytes!("assets/tray-template.png"))?;
     let dimmed_icon = dim_icon(&icon);
-    let dot_idle_icon = dot_icon(&icon, dot_alphas(false));
-    let dot_active_icon = dot_icon(&icon, dot_alphas(true));
+    let dot_idle_icon = dot_icon_at(&icon, 6, 24, dot_alphas(false));
+    let dot_active_icon = dot_icon_at(&icon, 6, 24, dot_alphas(true));
+    let spin = spin_frames(&icon);
     let tray = TrayIconBuilder::with_id("slashie-tray")
         .icon(icon.clone())
         .icon_as_template(true)
@@ -225,6 +233,7 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                     Frame::Plain => &icon,
                     Frame::DotIdle => &dot_idle_icon,
                     Frame::DotActive => &dot_active_icon,
+                    Frame::Spin(step) => &spin[step],
                 };
                 if tray
                     .set_icon_with_as_template(Some(next_icon.clone()), true)
@@ -255,7 +264,12 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 last_polling = polling_now;
             }
-            std::thread::sleep(SAMPLE_INTERVAL);
+            // Advance the spinner faster than the static sampling cadence.
+            std::thread::sleep(if matches!(frame, Frame::Spin(_)) {
+                SPIN_INTERVAL
+            } else {
+                SAMPLE_INTERVAL
+            });
         }
     });
     Ok(())
@@ -289,16 +303,41 @@ fn dot_alphas(bright: bool) -> [[u8; 4]; 4] {
     }
 }
 
-fn dot_icon(base: &Image<'_>, alphas: [[u8; 4]; 4]) -> Image<'static> {
+/// Stamp a 4x4 dot with its top-left corner at (ox, oy), clamped to the icon.
+fn dot_icon_at(base: &Image<'_>, ox: isize, oy: isize, alphas: [[u8; 4]; 4]) -> Image<'static> {
     let mut rgba = base.rgba().to_vec();
-    // Add a small round dot in the transparent space beside the slash tail.
-    for (y, row) in alphas.into_iter().enumerate() {
-        for (x, opacity) in row.into_iter().enumerate() {
-            let pixel = ((24 + y) * base.width() as usize + 6 + x) * 4;
-            rgba[pixel..pixel + 4].copy_from_slice(&[0, 0, 0, opacity]);
+    let width = base.width() as isize;
+    for (y, row) in alphas.iter().enumerate() {
+        for (x, opacity) in row.iter().enumerate() {
+            let px = ox + x as isize;
+            let py = oy + y as isize;
+            if px < 0 || py < 0 || px >= width || py >= width {
+                continue;
+            }
+            let pixel = ((py * width + px) * 4) as usize;
+            rgba[pixel..pixel + 4].copy_from_slice(&[0, 0, 0, *opacity]);
         }
     }
     Image::new_owned(rgba, base.width(), base.height())
+}
+
+/// The spinner frames: the bright dot orbiting the clear space beside the
+/// slash tail, one step per sample while a scan is in flight.
+fn spin_frames(base: &Image<'_>) -> Vec<Image<'static>> {
+    let alphas = dot_alphas(true);
+    (0..SPIN_STEPS)
+        .map(|step| {
+            let angle = step as f64 * std::f64::consts::TAU / SPIN_STEPS as f64;
+            let cx = SPIN_CENTER.0 + SPIN_RADIUS * angle.cos();
+            let cy = SPIN_CENTER.1 + SPIN_RADIUS * angle.sin();
+            dot_icon_at(
+                base,
+                cx.round() as isize - 1,
+                cy.round() as isize - 1,
+                alphas,
+            )
+        })
+        .collect()
 }
 
 /// Template icons carry their shape in alpha; dimming it signals paused.
@@ -572,14 +611,12 @@ mod tests {
             Frame::DotIdle
         );
 
-        // A scan in flight breathes with the tick: two samples bright,
-        // two dim, repeating.
+        // A scan in flight spins the dot around the slash.
         status.scanning = true;
-        assert_eq!(tray_frame(&status, true, now, 0), Frame::DotActive);
-        assert_eq!(tray_frame(&status, true, now, 1), Frame::DotActive);
-        assert_eq!(tray_frame(&status, true, now, 2), Frame::DotIdle);
-        assert_eq!(tray_frame(&status, true, now, 3), Frame::DotIdle);
-        assert_eq!(tray_frame(&status, true, now, 4), Frame::DotActive);
+        assert_eq!(tray_frame(&status, true, now, 0), Frame::Spin(0));
+        assert_eq!(tray_frame(&status, true, now, 1), Frame::Spin(1));
+        assert_eq!(tray_frame(&status, true, now, 7), Frame::Spin(7));
+        assert_eq!(tray_frame(&status, true, now, 8), Frame::Spin(0));
         assert_eq!(tray_frame(&status, false, now, 0), Frame::Dimmed);
 
         // The status line carries phases and faults; the dot drops out.
