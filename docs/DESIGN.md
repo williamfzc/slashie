@@ -77,6 +77,10 @@ Run the trusted route program with `/bin/sh -c`. Pass message data through the e
 
 Quote values that may contain whitespace. Commands consuming message data should expand the variables in quotes. The runtime never interpolates message text into the shell program.
 
+Close the command's stdin pipe writer to signal EOF. Give each subprocess its own Unix process group. Apply a bounded deadline to Feishu calls and each route's configured timeout to its command. On timeout, shutdown, or ordinary exit with surviving group members, send SIGTERM to the group, wait up to two seconds, then SIGKILL remaining members. Reap the direct child. A child that leaves the group is outside this guarantee. Bound the final pipe drain in case a detached child holds a pipe open. [Rust Unix process groups](https://doc.rust-lang.org/std/os/unix/process/trait.CommandExt.html#tymethod.process_group)
+
+Drain stdout and stderr concurrently and keep at most 64 KiB of each in memory. Send the outcome text described in the [product contract](product.md#trigger-and-reply). For diagnostics use stderr, then stdout if stderr is empty. Limit the complete reply to 4,000 Unicode characters and the verified API byte limit, including any truncation notice. Persist only operational metadata. Log command exit or timeout separately from reply sent, rejected, or uncertain.
+
 ### Chat sessions
 
 A route with `"session": "chat"` keeps one agent conversation per Feishu chat. It runs in `~/.slashie/chats/<chat-id>/`, created with user-only permissions. `dir` is not allowed on such a route because the workspace must stay stable for the agent's own session lookup.
@@ -84,10 +88,6 @@ A route with `"session": "chat"` keeps one agent conversation per Feishu chat. I
 The first successful command for a `(chat, route)` pair records that mapping in `state.json`. Later commands are told to resume: `SLASHIE_CONTINUE=1`, and the stock agent routes call `--continue` or `exec resume --last` in the same workspace. The agent CLI owns the actual session and its ID; Slashie keeps only the stable workspace and the resume decision.
 
 A different Feishu chat gets a different workspace, so it starts fresh. A failed first command does not create the mapping. To reset an existing chat, stop Slashie, delete `chats/<chat-id>/`, and remove that chat's entries from `state.json`; the next command starts a new agent session. If the agent's own session store is deleted, the resume command fails and the reply carries the diagnostic.
-
-Close the command's stdin pipe writer to signal EOF. Give each subprocess its own Unix process group. Apply a bounded deadline to Feishu calls and each route's configured timeout to its command. On timeout, shutdown, or ordinary exit with surviving group members, send SIGTERM to the group, wait up to two seconds, then SIGKILL remaining members. Reap the direct child. A child that leaves the group is outside this guarantee. Bound the final pipe drain in case a detached child holds a pipe open. [Rust Unix process groups](https://doc.rust-lang.org/std/os/unix/process/trait.CommandExt.html#tymethod.process_group)
-
-Drain stdout and stderr concurrently and keep at most 64 KiB of each in memory. Send the outcome text described in the [product contract](product.md#trigger-and-reply). For diagnostics use stderr, then stdout if stderr is empty. Limit the complete reply to 4,000 Unicode characters and the verified API byte limit, including any truncation notice. Persist only operational metadata. Log command exit or timeout separately from reply sent, rejected, or uncertain.
 
 ## Configuration and files
 
