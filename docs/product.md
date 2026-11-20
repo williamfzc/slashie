@@ -33,10 +33,10 @@ A claimed message gets at most one execution attempt on the same host while its 
 | Milestone | Scope and evidence |
 | --- | --- |
 | macOS prototype | Commit `a23ce0a` records the Feishu-to-command loop and a single-command `/doubao` observation of 6.8–8.8 seconds under the former name `fsq`. |
-| v1.1 | macOS native menu and foreground headless mode over the shared runtime. Acceptance is pending implementation. |
+| v1.1 | The macOS tray, Settings, and foreground headless mode share the Rust runtime. Local build and mock checks passed. A live self-chat test verified that a temporary `/pi` route could read a preceding Feishu message and reply correctly to the original question. |
 | v1.2 | Linux headless build and systemd user service. Acceptance is pending Linux validation. |
 
-This checkout contains specifications. An isolated Cargo probe verified the optional desktop build and macOS bundle layout. It exercised neither the Slashie runtime nor the Feishu workflow. If search cannot reliably discover requests in the release-target conversations, revisit the trigger mechanism before release.
+The `/pi` context reader was part of the test harness. The shipped route interface passes a source message ID to configured commands. Release acceptance still includes the macOS bundle and native interactions, real direct-message and ordinary-group coverage, and search recall. If search cannot reliably discover requests in the release-target conversations, revisit the trigger mechanism before release.
 
 ## Release acceptance
 

@@ -22,7 +22,7 @@ Give each host a control handle for status, polling changes, and shutdown. A coo
 
 ### Launch and shutdown
 
-The macOS bundle starts in menu-bar mode. `--headless` selects foreground mode before Tauri initializes. A headless build uses foreground mode by default. `--help` and `--version` exit before opening runtime files. An optional headless startup argument, `--poll on|off`, updates the same persisted polling setting as the menu. Apply it under the lock. A headless lock conflict reports an error and exits.
+The macOS bundle starts in menu-bar mode. `--headless` selects foreground mode before Tauri initializes. A headless build uses foreground mode by default. `--help` and `--version` exit before opening runtime files. The headless control command `--poll on|off` updates the same persisted polling setting as the menu under the lock, then exits. A headless lock conflict reports an error and exits.
 
 Menu Quit and headless SIGINT/SIGTERM request shared shutdown. Stop intake, cancel active Feishu calls, terminate and reap the active command group, and release the lock after cleanup. Abandoned claims remain consumed. Canceling a request after Feishu may have accepted it leaves delivery uncertain.
 
@@ -40,11 +40,11 @@ For v1.2, use a systemd user service under the authorized account. Invoke the fo
 
 ## Feishu adapter
 
-Use an explicit Lark CLI profile and `--as user`. Verify the authorized user's `open_id` and persist the binding. A changed identity blocks intake and delivery. The operator must restore the expected identity. CLI version 1.0.68 is the local inspection baseline. Pin the shipping version after live acceptance.
+Use `--as user` and the configured Lark CLI profile. An empty profile uses the CLI’s active default. Verify the authorized user's `open_id` and persist the binding. A changed identity blocks intake and delivery. The operator must restore the expected identity. CLI version 1.0.68 is the local inspection baseline. Pin the shipping version after live acceptance.
 
 | Operation | Contract |
 | --- | --- |
-| Search | Call raw `POST /open-apis/im/v1/messages/search` with `filter.from_ids` and a fixed RFC 3339 `filter.time_range` for the scan. Read IDs from `data.items[].meta_data.message_id`. Follow `has_more` and `page_token`. Use one strategy that passes recall tests in the release account. Try a sender-and-time search with an empty query first, then test configured-prefix queries if needed. |
+| Search | Call raw `POST /open-apis/im/v1/messages/search` with `filter.from_ids` and whole-second RFC 3339 `filter.time_range.start_time` and `end_time`. Round the start down and the end up. Pass `page_size` and `page_token` in the query string. Read IDs from `data.items[].meta_data.message_id` and follow `has_more`. Use one strategy that passes recall tests in the release account. Try a sender-and-time search with an empty query first, then test configured-prefix queries if needed. |
 | Read details | Batch up to 50 IDs through raw `GET /open-apis/im/v1/messages/mget`. Decode `body.content`, verify sender and creation time locally, and use the verified meanings of `root_id` and `parent_id` to admit original messages only. Validate the response shape and skip unclassifiable placement. |
 | Source | Use a verified message link if available, then a conversation link if available. Always include the message ID. |
 | Reply | Call `im +messages-reply --as user` with the source message ID, literal text, verified placement, and an idempotency key derived from the source ID. Use one adapter attempt. A confirmed reply returns a reply ID. Distinguish definitive rejection from uncertain delivery. |
@@ -69,11 +69,11 @@ Drain stdout and stderr concurrently and keep at most 64 KiB of each in memory. 
 
 ## Configuration and files
 
-Read and validate configuration once at launch. Resolve the Lark CLI executable and profile explicitly. Give both hosts the same subprocess `PATH`. Add the Node directory if the installed Lark CLI is an npm wrapper. On a new installation, create a configuration with `/ping` and initialize state with polling paused. [Tauri bundle environment](https://v2.tauri.app/distribute/macos-application-bundle/) · [Lark CLI npm entry point](https://github.com/larksuite/cli/blob/main/package.json)
+Read and validate configuration once at launch. Configure the Lark CLI executable and optional profile. Give both hosts the same subprocess `PATH`. Add the Node directory if the installed Lark CLI is an npm wrapper. On a new installation, create a configuration with `/ping` and initialize state with polling paused. [Tauri bundle environment](https://v2.tauri.app/distribute/macos-application-bundle/) · [Lark CLI npm entry point](https://github.com/larksuite/cli/blob/main/package.json)
 
 ```json
 {
-  "lark_cli": { "path": "/absolute/path/to/lark-cli", "profile": "default" },
+  "lark_cli": { "path": "/absolute/path/to/lark-cli", "profile": "" },
   "process_path": ["/usr/bin", "/bin", "/usr/sbin", "/sbin"],
   "poll_interval": 20,
   "routes": [
