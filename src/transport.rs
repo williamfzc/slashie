@@ -303,6 +303,37 @@ impl Channel for MockTransport {
     }
 }
 
+/// Placeholder channel for a host that started unconfigured: the runtime
+/// blocks intake before any wire call, so these operations are never
+/// reached; they fail closed if they ever are.
+pub struct UnconfiguredChannel;
+
+impl Channel for UnconfiguredChannel {
+    fn id(&self) -> &'static str {
+        "feishu"
+    }
+
+    fn workspace_dir(&self, home: &Path, key: &ConversationKey) -> PathBuf {
+        chat_workspace_dir(home, key)
+    }
+
+    fn search(&self, _from_ms: i64, _to_ms: i64) -> Result<Vec<String>, TransportError> {
+        Err(TransportError::Fatal("slashie is not configured".into()))
+    }
+
+    fn mget(&self, _ids: &[String]) -> Result<Vec<Message>, TransportError> {
+        Err(TransportError::Fatal("slashie is not configured".into()))
+    }
+
+    fn react_processing(&self, _source_id: &str) -> Result<(), TransportError> {
+        Err(TransportError::Fatal("slashie is not configured".into()))
+    }
+
+    fn reply(&self, _source_id: &str, _text: &str, _in_thread: bool) -> Result<String, ReplyError> {
+        Err(ReplyError::Rejected("slashie is not configured".into()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

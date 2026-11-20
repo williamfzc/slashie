@@ -9,7 +9,17 @@ use std::path::Path;
 pub const DEFAULT_POLL_INTERVAL: u64 = 20;
 pub const ALLOWED_POLL_INTERVALS: [u64; 4] = [10, 20, 30, 60];
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
-pub const DEFAULT_PROCESS_PATH: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+/// System dirs plus the common Homebrew prefixes, so the stock agent
+/// routes (`claude`, `codex`, `pi`) resolve on a normal machine without
+/// hand-editing config.json (DESIGN.md "Configuration and files").
+pub const DEFAULT_PROCESS_PATH: [&str; 6] = [
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LarkCli {

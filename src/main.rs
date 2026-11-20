@@ -172,13 +172,18 @@ fn main() {
         .unwrap_or_else(|e| fail(&format!("cannot create {}: {}", home.display(), e)));
 
     // Exclusive instance lock, held until shutdown; a Finder-launched second
-    // instance shows the native alert and exits.
+    // instance shows the native alert and exits. A headless conflict explains
+    // the way out in plain text (DESIGN.md "Launch and shutdown").
     let guard = match lock::acquire(&home) {
         lock::LockResult::Acquired(g) => g,
-        lock::LockResult::Conflict => alert_and_exit(&format!(
-            "Slashie is already running. (lock held at {})",
-            home.join("app.lock").display()
-        )),
+        lock::LockResult::Conflict => {
+            let msg = if menu_bar_mode {
+                "Slashie is already running."
+            } else {
+                "Slashie is already running; stop it first or use its menu                  to change polling. (lock held at the configured home)"
+            };
+            alert_and_exit(msg)
+        }
         lock::LockResult::Failed(m) => fail(&m),
     };
     // The AppLock is held for the process lifetime; nothing reads the file.
@@ -197,8 +202,16 @@ fn main() {
     let (config, config_fault) = config::Config::load_or_create(&home)
         .unwrap_or_else(|e| fail(&format!("cannot read config.json: {}", e)));
 
-    let (transport, identity): (Arc<dyn transport::Channel>, String) = match &mock_path {
-        Some(path) => {
+    // Startup faults must not kill the menu bar before it exists: in
+    // menu-bar mode a fault yields a placeholder channel, an unbound
+    // identity, and the matching operator-action row (menu-bar.md "Status
+    // text"). Headless reports the fault and exits.
+    enum Startup {
+        Ready(Arc<dyn transport::Channel>, String),
+        Unconfigured(String, status::OperatorFault),
+    }
+    let startup: Startup = match (&mock_path, poll) {
+        (Some(path), _) => {
             let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
                 fail(&format!(
                     "cannot read mock fixture {}: {}",
@@ -209,53 +222,84 @@ fn main() {
             let mock =
                 Arc::new(transport::MockTransport::from_json(&text).unwrap_or_else(|e| fail(&e)));
             let id = mock.self_open_id().to_string();
-            let t: Arc<dyn transport::Channel> = mock;
-            (t, id)
+            Startup::Ready(mock as Arc<dyn transport::Channel>, id)
         }
-        None if poll.is_some() => {
-            // Control invocation: no transport is needed to update the
-            // persisted polling setting under the lock.
-            let ok = runtime::apply_poll_control(&home, poll.unwrap()).unwrap_or_else(|e| fail(&e));
+        // Control invocation: no transport is needed to update the
+        // persisted polling setting under the lock.
+        (None, Some(on)) => {
+            let ok = runtime::apply_poll_control(&home, on).unwrap_or_else(|e| fail(&e));
             println!("polling set to {}", if ok { "on" } else { "off" });
             return;
         }
-        None => {
+        (None, None) => {
+            let die_or_wait = |msg: String, action: status::OperatorFault| -> Startup {
+                if menu_bar_mode {
+                    Startup::Unconfigured(msg, action)
+                } else {
+                    fail(&msg)
+                }
+            };
+            let config_path = home.join("config.json").display().to_string();
             if let Some(fault) = &config_fault {
-                fail(&format!(
-                    "config.json is invalid: {} (fix the file and restart)",
-                    fault
-                ));
-            }
-            let cli = config.lark_cli.clone().unwrap_or_else(|| {
-                fail(
-                    "config.json has no lark_cli section; set lark_cli.path and \
-                     lark_cli.profile to your Lark CLI executable and profile",
+                die_or_wait(
+                    format!(
+                        "config.json at {} is invalid: {} (fix the file and restart)",
+                        config_path, fault
+                    ),
+                    status::OperatorFault::CheckSettingsAndRestart,
                 )
-            });
-            let lark = Arc::new(lark::LarkCliTransport::new(
-                &cli,
-                &config.process_path,
-                shutdown.clone(),
-            ));
-            let id = lark.verify_identity().unwrap_or_else(|e| {
-                fail(&format!(
-                    "identity verification failed: {} (operator action required)",
-                    e
-                ))
-            });
-            lark.set_self_id(&id);
-            let t: Arc<dyn transport::Channel> = lark;
-            (t, id)
+            } else if let Some(cli) = config.lark_cli.clone() {
+                let lark = Arc::new(lark::LarkCliTransport::new(
+                    &cli,
+                    &config.process_path,
+                    shutdown.clone(),
+                ));
+                match lark.verify_identity() {
+                    Ok(id) => {
+                        lark.set_self_id(&id);
+                        Startup::Ready(lark as Arc<dyn transport::Channel>, id)
+                    }
+                    Err(e) => die_or_wait(
+                        format!(
+                            "identity verification failed: {}; authenticate the \
+                             Lark CLI (lark-cli login) and restart",
+                            e
+                        ),
+                        status::OperatorFault::SignInToFeishu,
+                    ),
+                }
+            } else {
+                die_or_wait(
+                    format!(
+                        "config.json at {} has no lark_cli section; set lark_cli.path \
+                         and lark_cli.profile to your Lark CLI executable and profile",
+                        config_path
+                    ),
+                    status::OperatorFault::CheckSettingsAndRestart,
+                )
+            }
+        }
+    };
+
+    let (transport, identity, startup_fault) = match startup {
+        Startup::Ready(t, id) => (t, id, None),
+        Startup::Unconfigured(msg, action) => {
+            let t: Arc<dyn transport::Channel> = Arc::new(transport::UnconfiguredChannel);
+            (t, String::new(), Some((msg, action)))
         }
     };
 
     let logger = Arc::new(logging::Logger::new(&home, !menu_bar_mode));
+    let startup_blocked = startup_fault
+        .as_ref()
+        .map(|(msg, _)| msg.clone())
+        .or(config_fault);
     let rt = Arc::new(
         runtime::Runtime::init(
             home,
             runtime::LoadedConfig {
                 config,
-                fault: config_fault,
+                fault: startup_blocked,
             },
             transport,
             identity,
@@ -267,6 +311,13 @@ fn main() {
     );
     // The mailbox runner reaches process_job through this handle.
     rt.attach_arc();
+    if let Some((msg, action)) = &startup_fault {
+        rt.status.lock().unwrap().operator_action = Some(action.clone());
+        logger.log(&format!("ERROR {}", msg));
+    }
+    if rt.fresh_install {
+        logger.log("first run: state created; polling starts paused");
+    }
 
     if let Some(reason) = rt.intake_blocked.lock().unwrap().clone() {
         logger.log(&format!("ERROR intake blocked: {}", reason));

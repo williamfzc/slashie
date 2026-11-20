@@ -215,7 +215,7 @@
       <details>
         <summary>Command variables</summary>
         <p><code>"$SLASHIE_ARGS"</code> passes the text after the prefix. <code>"$SLASHIE_PROMPT"</code> includes that text and the message source.</p>
-        <p>For example, use <code>codex exec "$SLASHIE_PROMPT"</code>. A fixed command like <code>echo pong</code> needs no input.</p>
+        <p>For example, use <code>codex exec "$SLASHIE_PROMPT"</code>. A fixed command like <code>echo pong</code> needs no input. <code>$SLASHIE_PROMPT</code> appends a source block with the message ID, chat, topic (when in one), and sender.</p>
         <p>A route with <code>"session": "chat"</code> in config.json keeps one agent session per conversation (chat or topic) and passes <code>$SLASHIE_CONTINUE</code>.</p>
       </details>
     </main>
@@ -469,7 +469,7 @@
         if (result === "Saved") {
           snapshot = null;
           baseline = JSON.stringify(draft);
-          status.textContent = "Saved. Applies at the next scan.";
+          status.textContent = `Saved. Slashie picks it up within about ${draft.pollInterval}s.`;
           try {
             const settings = await readSettings();
             if (JSON.stringify(settings.draft) !== baseline) {
@@ -514,7 +514,7 @@
         runtimeText.textContent = runtime.status_text;
       } else if (!runtime.polling) {
         runtimeDot.classList.remove("on", "scanning");
-        runtimeText.textContent = "Polling is paused.";
+        runtimeText.textContent = "Polling is paused. Enable it from the Slashie menu-bar icon.";
       } else if (runtime.scanning) {
         runtimeDot.classList.add("on", "scanning");
         runtimeText.textContent = `Polling every ${runtime.poll_interval_secs}s · scanning…`;

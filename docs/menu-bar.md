@@ -31,7 +31,9 @@ A primary click or keyboard activation opens the menu. This is the enabled state
 
 `Polling` is one native checkable menu item. Checked means intake is enabled. Unchecked means it is paused. The checkmark reflects the saved setting even when an enabled poller is retrying. Confirm the change after the runtime writes it, and restore the previous checkmark if the write fails. Disable the toggle while saving, shutting down, or when the setting is unavailable. [Apple guidance on toggled menu items](https://developer.apple.com/design/human-interface-guidelines/menus#Toggled-items) · [Tauri checkable menu item](https://docs.rs/tauri/latest/tauri/menu/struct.CheckMenuItem.html)
 
-`Settings…` opens or focuses the single settings window. `Quit Slashie` requests [shared shutdown](DESIGN.md#launch-and-shutdown). If Finder launches a second instance, show `Slashie is already running.` in a native alert, then exit.
+`Settings…` opens or focuses the single settings window. On the first run — when this launch created the local state — the window opens by itself, so setup starts visibly. `Quit Slashie` requests [shared shutdown](DESIGN.md#launch-and-shutdown). If Finder launches a second instance, show `Slashie is already running.` in a native alert, then exit.
+
+A startup fault must not remove the menu: when the Lark CLI is missing, unauthenticated, or the configuration is invalid, the icon stays with the matching [status row](#status-text) (`Check Settings and restart` or `Sign in to Feishu and restart`) instead of exiting silently.
 
 ## Status text
 

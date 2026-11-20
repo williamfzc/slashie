@@ -112,6 +112,11 @@ pub fn run(rt: Arc<Runtime>, shutdown: Arc<AtomicBool>) {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             build_tray(app.handle().clone())?;
+            // A first run has no way to discover the menu; open Settings so
+            // the setup path (lark_cli, polling) starts visibly.
+            if app.state::<AppState>().rt.fresh_install {
+                open_settings(app.handle());
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -343,7 +348,7 @@ fn spin_frames(base: &Image<'_>) -> Vec<Image<'static>> {
 
 /// Template icons carry their shape in alpha; dimming it signals paused.
 fn dim_icon(base: &Image<'_>) -> Image<'static> {
-    let dim = |v: u8| ((v as u32 * 35) / 100) as u8;
+    let dim = |v: u8| ((v as u32 * 45) / 100) as u8;
     let rgba: Vec<u8> = base
         .rgba()
         .as_chunks::<4>()
