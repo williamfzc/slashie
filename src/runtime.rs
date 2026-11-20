@@ -254,10 +254,12 @@ impl Runtime {
         };
 
         let end = now_ms();
-        let start = {
-            let st = self.state.lock().unwrap();
-            std::cmp::max(end - LOOKBACK_MS, st.pruning_cutoff_ms)
-        };
+        let horizon = end - LOOKBACK_MS;
+        // Search can index eligible messages after a scan has completed.
+        let start = horizon.max(boundary);
+        if start > end {
+            return Ok(0);
+        }
 
         let ids = match self.transport.search(start, end) {
             Ok(ids) => ids,
@@ -285,13 +287,17 @@ impl Runtime {
             }
         };
 
-        // Merge duplicate IDs.
-        let mut unique = Vec::new();
-        for id in ids {
-            if !unique.contains(&id) {
-                unique.push(id);
+        // Overlapping scans can rediscover consumed IDs. Fetch only new details.
+        let unique = {
+            let st = self.state.lock().unwrap();
+            let mut unique = Vec::new();
+            for id in ids {
+                if !st.is_consumed(&id) && !unique.contains(&id) {
+                    unique.push(id);
+                }
             }
-        }
+            unique
+        };
         let details = match self.transport.mget(&unique) {
             Ok(d) => d,
             Err(TransportError::Incomplete(m)) => {
@@ -305,8 +311,7 @@ impl Runtime {
             }
         };
 
-        // Eligibility: self-authored, top-level, text, not recalled, exact
-        // first-token prefix, created strictly after the boundary.
+        // The search API can round the requested window to whole seconds.
         let mut eligible: Vec<_> = details
             .into_iter()
             .filter(|m| {
@@ -315,6 +320,8 @@ impl Runtime {
                     && m.top_level
                     && m.text.is_some()
                     && m.created_at_ms > boundary
+                    && m.created_at_ms >= start
+                    && m.created_at_ms <= end
             })
             .filter(|m| {
                 let text = m.text.as_ref().unwrap();
@@ -372,20 +379,19 @@ impl Runtime {
             claimed += 1;
         }
 
-        // Complete scan: advance the pruning cutoff and prune settled claims
-        // that have left the scan horizon.
+        // Complete scan: record its end and prune settled claims that have
+        // left the scan horizon.
         {
             let mut status = self.status.lock().unwrap();
             let mut st = self.state.lock().unwrap();
-            st.advance_cutoff(end);
-            let horizon = end - LOOKBACK_MS;
+            st.record_scan_end(end);
             st.claims.retain(|c| {
                 !(c.status == ClaimStatus::Settled
                     && c.settled_at_ms.map(|t| t < horizon).unwrap_or(false))
             });
             if let Err(e) = save(&self.home, &st) {
                 self.logger
-                    .log(&format!("ERROR cannot persist pruning cutoff: {}", e));
+                    .log(&format!("ERROR cannot persist scan end: {}", e));
             } else if st.polling
                 && !self.shutdown.load(Ordering::SeqCst)
                 && *self.resume_boundary_ms.lock().unwrap() == boundary
@@ -720,6 +726,32 @@ mod tests {
     }
 
     #[test]
+    fn late_search_result_is_admitted_after_a_completed_scan() {
+        let boundary = now_ms() - 60_000;
+        let message = mkmsg(
+            "om_late",
+            boundary + 1_000,
+            "ou_self",
+            Some("/ping"),
+            true,
+            false,
+        );
+        let (mut rt, _, home) = init_rt("late_index", fixture_with(vec![]), boundary);
+        assert_eq!(rt.scan_once().unwrap(), 0);
+        let st = match load_or_init(&home).unwrap() {
+            StateLoad::Loaded(s) => s,
+            _ => panic!(),
+        };
+        assert!(st.last_scan_end_ms > message.created_at_ms);
+
+        // The same message becomes visible to search only after that scan.
+        rt.transport = Arc::new(MockTransport::new(fixture_with(vec![message])));
+        assert_eq!(rt.scan_once().unwrap(), 1);
+        assert_eq!(rt.scan_once().unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn queue_bound_leaves_candidates_unclaimed() {
         let now = now_ms();
         let boundary = now - 60_000;
@@ -746,6 +778,12 @@ mod tests {
             _ => panic!(),
         };
         assert_eq!(st.claims.len(), MAX_WAITING_JOBS);
+        let job_rx = rt.job_rx.lock().unwrap();
+        for _ in 0..2 {
+            let job = job_rx.as_ref().unwrap().try_recv().unwrap().unwrap();
+            rt.process_job(job);
+        }
+        assert_eq!(rt.scan_once().unwrap(), 2);
         let _ = std::fs::remove_dir_all(&home);
     }
 

@@ -58,7 +58,7 @@ The search shortcut projects out placement fields and can report successful exit
 - Merge duplicate IDs and consider eligible messages in creation order, with message ID as the tiebreaker. Split at the first whitespace and do an exact prefix lookup. Preserve the internal line breaks of the remaining input. Exclude all replies using the validated Feishu placement rules.
 - Run one worker with at most 10 waiting jobs. Reserve space, then durably claim the message ID before handing it off. Leave candidates unclaimed when the queue is full so a later scan can find them within the window. The worker finishes a command and its reply attempt before taking the next job.
 - Keep pending and settled claims keyed by message ID. Settle each claim after its command and reply attempt. On restart, report pending claims as interrupted and settle them before pruning or polling. Replace state atomically using a synced file and directory. Missing or invalid state after initialization blocks intake.
-- Keep unsettled claims and settled claims inside the current scan horizon. Persist a nondecreasing pruning cutoff, and never scan before it. Pause and claim updates are serialized. Resume sets a new time boundary, and a pause invalidates results from a scan already in flight.
+- Keep unsettled claims and settled claims inside the current scan horizon. Persist the latest completed scan end for diagnostics. Each scan overlaps the previous window within the five-minute horizon so late-indexed and unclaimed requests can be found. Durable claims prevent duplicate execution. Pause and claim updates are serialized. Resume sets a new time boundary, and a pause invalidates results from a scan already in flight.
 
 ## Command execution
 
@@ -90,7 +90,7 @@ On initial setup, the stock configuration includes `/ping` (replies `pong`), `/p
 | File | Source of truth |
 | --- | --- |
 | `config.json` | Polling interval, CLI and path settings, and route definitions. Restart after edits. |
-| `state.json` | Polling setting, identity binding, pruning cutoff, and consumed IDs. |
+| `state.json` | Polling setting, identity binding, latest completed scan end, and consumed IDs. |
 | `app.lock` | Instance ownership via a held descriptor. |
 | `slashie.log` | Timestamps, IDs, durations, and outcomes. Rotate at 2 MiB and keep one previous log. |
 

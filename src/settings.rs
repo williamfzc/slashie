@@ -7,7 +7,9 @@
 //! (lark_cli, process_path), and rejects the save when the file changed
 //! since the window loaded it. Saved edits take effect after restart.
 
-use crate::config::{atomic_write, validate, Config, Route, ALLOWED_POLL_INTERVALS};
+use crate::config::{
+    atomic_write, route_prefix_problem, validate, Config, Route, ALLOWED_POLL_INTERVALS,
+};
 use std::path::Path;
 
 /// One editable row in the Settings window.
@@ -56,17 +58,11 @@ impl SettingsDraft {
         }
         let mut seen: Vec<&str> = Vec::new();
         for (i, r) in self.routes.iter().enumerate() {
-            if r.prefix.is_empty() || !r.prefix.starts_with('/') {
+            if let Some(problem) = route_prefix_problem(&r.prefix) {
                 errors.push(FieldError {
                     row: Some(i),
                     field: "prefix".into(),
-                    message: "must start with '/'".into(),
-                });
-            } else if r.prefix.split_whitespace().count() != 1 {
-                errors.push(FieldError {
-                    row: Some(i),
-                    field: "prefix".into(),
-                    message: "must be a single token".into(),
+                    message: problem.into(),
                 });
             } else if seen.contains(&r.prefix.as_str()) {
                 errors.push(FieldError {
@@ -157,13 +153,10 @@ pub fn save_settings(home: &Path, loaded_snapshot: &str, draft: &SettingsDraft) 
     if current != loaded_snapshot {
         return SaveOutcome::FileChanged;
     }
-    let (base, fault) = match Config::load_or_create(home) {
-        Ok(v) => v,
-        Err(e) => return SaveOutcome::Io(format!("cannot load config: {}", e)),
+    let base = match Config::parse(&current) {
+        Ok(config) => config,
+        Err(_) => return SaveOutcome::Unparsable(path.display().to_string()),
     };
-    if fault.is_some() {
-        return SaveOutcome::Unparsable(path.display().to_string());
-    }
     let merged = match draft.apply_to(&base) {
         Ok(c) => c,
         Err(_) => return SaveOutcome::Invalid(draft.validate()),
@@ -215,6 +208,10 @@ mod tests {
         let errs = d.validate();
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].field, "poll_interval");
+
+        let errs = draft(20, &[("/", "echo pong")]).validate();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].field, "prefix");
     }
 
     #[test]

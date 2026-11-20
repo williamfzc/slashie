@@ -94,6 +94,18 @@ fn is_absolute_or_home(dir: &str) -> bool {
     Path::new(dir).is_absolute() || dir == "~" || dir.starts_with("~/")
 }
 
+pub(crate) fn route_prefix_problem(prefix: &str) -> Option<&'static str> {
+    if !prefix.starts_with('/') {
+        Some("must start with '/'")
+    } else if prefix.len() < 2 {
+        Some("must include a command name after '/'")
+    } else if prefix.split_whitespace().count() != 1 || prefix.contains(['\n', '\t']) {
+        Some("must be a single token")
+    } else {
+        None
+    }
+}
+
 pub fn validate(cfg: &Config) -> Result<(), ConfigError> {
     if !ALLOWED_POLL_INTERVALS.contains(&cfg.poll_interval) {
         return err(format!(
@@ -104,14 +116,8 @@ pub fn validate(cfg: &Config) -> Result<(), ConfigError> {
     let mut seen: Vec<&str> = Vec::new();
     for route in &cfg.routes {
         let p = route.prefix.as_str();
-        if !p.starts_with('/') {
-            return err(format!("route prefix {:?} must start with '/'", p));
-        }
-        if p.len() < 2 {
-            return err("route prefix must be a nonempty token after '/'");
-        }
-        if p.split_whitespace().count() != 1 || p.contains('\n') || p.contains('\t') {
-            return err(format!("route prefix {:?} must be a single token", p));
+        if let Some(problem) = route_prefix_problem(p) {
+            return err(format!("route prefix {:?} {}", p, problem));
         }
         if seen.contains(&p) {
             return err(format!("duplicate route prefix {:?}", p));

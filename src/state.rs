@@ -1,8 +1,8 @@
 //! Durable runtime state (DESIGN.md, "Polling and claims" and file table).
 //!
 //! `state.json` is the source of truth for the polling setting, the identity
-//! binding, the pruning cutoff, and consumed (pending/settled) claims keyed by
-//! message ID. Updates are serialized by the runtime coordinator and persisted
+//! binding, the last completed scan end, and consumed (pending/settled) claims
+//! keyed by message ID. Updates are serialized by the runtime coordinator and persisted
 //! atomically with a synced file and directory.
 
 use serde::{Deserialize, Serialize};
@@ -37,9 +37,9 @@ pub struct State {
     /// Verified identity binding (open_id). Intake blocks while absent/mismatched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
-    /// Nondecreasing cutoff: never scan before this timestamp.
-    #[serde(default)]
-    pub pruning_cutoff_ms: i64,
+    /// End of the latest completed scan, retained for diagnostics.
+    #[serde(default, alias = "pruning_cutoff_ms")]
+    pub last_scan_end_ms: i64,
     #[serde(default)]
     pub claims: Vec<Claim>,
 }
@@ -79,8 +79,8 @@ pub fn load_or_init(home: &Path) -> Result<StateLoad, StateError> {
             }
             let st: State = serde_json::from_str(&text)
                 .map_err(|e| StateError(format!("cannot parse state.json: {}", e)))?;
-            if st.pruning_cutoff_ms < 0 {
-                return Err(StateError("pruning_cutoff_ms must be nonnegative".into()));
+            if st.last_scan_end_ms < 0 {
+                return Err(StateError("last_scan_end_ms must be nonnegative".into()));
             }
             let mut seen: Vec<&str> = Vec::new();
             for c in &st.claims {
@@ -149,10 +149,10 @@ impl State {
         }
     }
 
-    /// Advance the pruning cutoff; it must never decrease.
-    pub fn advance_cutoff(&mut self, now_ms: i64) {
-        if now_ms > self.pruning_cutoff_ms {
-            self.pruning_cutoff_ms = now_ms;
+    /// Record the latest completed scan end; it must never decrease.
+    pub fn record_scan_end(&mut self, now_ms: i64) {
+        if now_ms > self.last_scan_end_ms {
+            self.last_scan_end_ms = now_ms;
         }
     }
 }
@@ -183,11 +183,20 @@ mod tests {
     }
 
     #[test]
-    fn cutoff_never_decreases() {
+    fn legacy_scan_end_field_still_loads() {
+        let st: State = serde_json::from_str(r#"{"polling":true,"pruning_cutoff_ms":42}"#).unwrap();
+        assert_eq!(st.last_scan_end_ms, 42);
+        let saved = serde_json::to_string(&st).unwrap();
+        assert!(saved.contains("last_scan_end_ms"));
+        assert!(!saved.contains("pruning_cutoff_ms"));
+    }
+
+    #[test]
+    fn scan_end_never_decreases() {
         let mut st = State::default();
-        st.advance_cutoff(500);
-        st.advance_cutoff(100);
-        assert_eq!(st.pruning_cutoff_ms, 500);
+        st.record_scan_end(500);
+        st.record_scan_end(100);
+        assert_eq!(st.last_scan_end_ms, 500);
     }
 
     #[test]
