@@ -63,7 +63,7 @@ fn print_help() {
          \n\
          ROUTE SUBCOMMANDS:\n\
              Edit config.json routes offline; the running runtime applies\n\
-             them at its next startup. Safe while Slashie is running.\n\
+             them at its next scan. Safe while Slashie is running.\n\
              route list        Print the route table as JSON.\n\
              route add <PREFIX> --cmd <COMMAND> [--dir <PATH>]\n\
                                [--timeout <SECS>] [--session chat]\n\
@@ -319,21 +319,17 @@ fn main() {
         logger.log("first run: state created; polling starts paused");
     }
 
-    if let Some(reason) = rt.intake_blocked.lock().unwrap().clone() {
-        logger.log(&format!("ERROR intake blocked: {}", reason));
-        eprintln!(
-            "slashie: intake blocked: {} (operator action required)",
-            reason
-        );
-        // Keep the fault observable; a control run still exits nonzero.
-        if poll.is_some() {
+    if poll.is_some() {
+        // `--poll on|off` (with `--mock`) is a control run: report a blocked
+        // intake honestly and exit nonzero; otherwise the persisted setting
+        // was applied under the lock and we are done.
+        if let Some(reason) = rt.intake_blocked.lock().unwrap().clone() {
+            eprintln!(
+                "slashie: intake blocked: {} (operator action required)",
+                reason
+            );
             std::process::exit(3);
         }
-    }
-
-    if poll.is_some() {
-        // `--poll on|off` is a control invocation: apply the persisted
-        // setting under the lock, then exit (see the slice handoff notes).
         return;
     }
 

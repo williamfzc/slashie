@@ -34,6 +34,13 @@ impl Logger {
             .append(true)
             .open(&self.path)
         {
+            // User-only log: IDs and outcomes still describe the operator's
+            // activity (DESIGN.md "Configuration and files").
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+            }
             let _ = f.write_all(full.as_bytes());
         }
         if self.mirror_stderr {

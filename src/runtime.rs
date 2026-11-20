@@ -110,10 +110,10 @@ impl Runtime {
             ))
         })?;
 
-        let (state, state_fault) = match load_or_init(&home) {
-            Ok(StateLoad::Created(s)) => (s, None),
-            Ok(StateLoad::Loaded(s)) => (s, None),
-            Err(e) => (State::default(), Some(e.to_string())),
+        let (state, state_fault, state_created) = match load_or_init(&home) {
+            Ok(StateLoad::Created(s)) => (s, None, true),
+            Ok(StateLoad::Loaded(s)) => (s, None, false),
+            Err(e) => (State::default(), Some(e.to_string()), false),
         };
 
         let blocked = config_fault.or(state_fault);
@@ -123,7 +123,7 @@ impl Runtime {
             ..Default::default()
         }));
 
-        let fresh_install = matches!(load_or_init(&home), Ok(StateLoad::Created(_)));
+        let fresh_install = state_created;
         let identity_verified = !identity.is_empty();
         let runtime = Runtime {
             config_mtime: Mutex::new(config_mtime(&home)),
@@ -981,18 +981,36 @@ mod tests {
         let claimed = rt.scan_once().unwrap();
         assert_eq!(
             claimed.len(),
-            MAX_WAITING_JOBS,
-            "only 10 reserved; rest wait for a later scan"
+            crate::mailbox::MAX_WAITING_PER_CONVERSATION,
+            "the conversation mailbox caps one scan; the rest wait"
         );
         let st = match load_or_init(&home).unwrap() {
             StateLoad::Loaded(s) => s,
             _ => panic!(),
         };
-        assert_eq!(st.claims.len(), MAX_WAITING_JOBS);
+        assert_eq!(
+            st.claims.len(),
+            crate::mailbox::MAX_WAITING_PER_CONVERSATION
+        );
         for job in claimed {
             rt.process_job(job);
         }
-        assert_eq!(rt.scan_once().unwrap().len(), 2);
+        // Each later scan admits another mailbox's worth; none are lost.
+        let more = rt.scan_once().unwrap();
+        assert_eq!(more.len(), crate::mailbox::MAX_WAITING_PER_CONVERSATION);
+        for job in more {
+            rt.process_job(job);
+        }
+        let rest = rt.scan_once().unwrap();
+        assert_eq!(
+            rest.len(),
+            12 - 2 * crate::mailbox::MAX_WAITING_PER_CONVERSATION
+        );
+        let st = match load_or_init(&home).unwrap() {
+            StateLoad::Loaded(s) => s,
+            _ => panic!(),
+        };
+        assert_eq!(st.claims.len(), 12);
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1721,6 +1739,89 @@ mod tests {
         assert!(ReplyError::Rejected("x".into())
             .to_string()
             .contains("rejected"));
+    }
+
+    #[test]
+    fn same_conversation_burst_is_capped_at_the_mailbox_not_silently_lost() {
+        let now = now_ms();
+        let boundary = now - 60_000;
+        let msgs: Vec<_> = (0..10)
+            .map(|n| {
+                mkmsg(
+                    &format!("om_h{n}"),
+                    boundary + 1_000 + n,
+                    "ou_self",
+                    Some("/ping"),
+                    true,
+                    false,
+                )
+            })
+            .collect();
+        let (rt, _mock, home) = init_rt("burst", fixture_with(msgs), boundary);
+        let jobs = rt.scan_once().unwrap();
+        assert_eq!(
+            jobs.len(),
+            crate::mailbox::MAX_WAITING_PER_CONVERSATION,
+            "only mailbox-capacity jobs are claimed in one scan"
+        );
+        rt.mailboxes.set_runner(Arc::new(|_job: Job| {}));
+        rt.mailboxes.deliver(jobs);
+        let st = match load_or_init(&home).unwrap() {
+            StateLoad::Loaded(s) => s,
+            _ => panic!(),
+        };
+        assert_eq!(
+            st.claims.len(),
+            crate::mailbox::MAX_WAITING_PER_CONVERSATION
+        );
+        assert!(
+            st.claims.iter().all(|c| c.status == ClaimStatus::Pending),
+            "delivered claims stay pending, unclaimed candidates stay unclaimed"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn fresh_install_flag_is_true_only_when_state_was_created() {
+        let home = test_home("freshflag");
+        let mock = Arc::new(MockTransport::new(fixture_with(vec![])));
+        let logger = Arc::new(Logger::new(&home, false));
+        let rt = Runtime::init(
+            home.clone(),
+            LoadedConfig {
+                config: Config::default(),
+                fault: None,
+            },
+            mock,
+            "ou_self".into(),
+            Arc::new(AtomicBool::new(false)),
+            logger,
+            None,
+        )
+        .unwrap();
+        assert!(
+            rt.fresh_install,
+            "first init on an empty home is a fresh install"
+        );
+
+        // A second run on the same home is not.
+        let mock = Arc::new(MockTransport::new(fixture_with(vec![])));
+        let logger = Arc::new(Logger::new(&home, false));
+        let rt = Runtime::init(
+            home.clone(),
+            LoadedConfig {
+                config: Config::default(),
+                fault: None,
+            },
+            mock,
+            "ou_self".into(),
+            Arc::new(AtomicBool::new(false)),
+            logger,
+            None,
+        )
+        .unwrap();
+        assert!(!rt.fresh_install);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

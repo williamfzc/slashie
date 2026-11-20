@@ -100,7 +100,11 @@ impl Mailboxes {
                 }
             }
             None => {
-                if extra > 0 || registry.map.len() < MAX_ACTIVE_CONVERSATIONS {
+                if extra >= MAX_WAITING_PER_CONVERSATION {
+                    Room::MailboxFull
+                } else if extra > 0 || registry.map.len() < MAX_ACTIVE_CONVERSATIONS {
+                    // An extra > 0 means an earlier claim in this scan
+                    // already promised this conversation a mailbox.
                     Room::Available
                 } else {
                     Room::MailboxesExhausted
@@ -189,10 +193,12 @@ impl Mailboxes {
         }
     }
 
-    /// Shutdown: stop intake everywhere, let every worker finish its queued
-    /// jobs, and join them. A job executing at this moment runs to
-    /// completion unless the process itself is killed; claims left pending
-    /// by a kill recover as interrupted on restart.
+    /// Shutdown: stop intake everywhere and hand every queued job to its
+    /// runner before joining the workers. The command runner itself aborts
+    /// an in-flight or never-started command on the shutdown flag and
+    /// replies a cancellation notice, so queued work finishes as a reply,
+    /// not silence. A kill before that leaves pending claims, which
+    /// recover as interrupted on restart.
     pub fn drain_and_join(&self) {
         let mut registry = self.registry.lock().unwrap();
         let taken: Vec<Mailbox> = registry.map.drain().map(|(_, mailbox)| mailbox).collect();

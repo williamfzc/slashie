@@ -1,9 +1,9 @@
 //! `slashie route` subcommands: list, add, and remove route entries in
 //! config.json (DESIGN.md, "Configuration and files"). This is the
 //! interface agents use to configure routes without hand-editing JSON.
-//! The subcommand parses before the instance lock: the runtime reads the
-//! file once at startup, so an offline edit never races a running app, and
-//! a second process must not trip the second-instance alert.
+//! The subcommand parses before the instance lock, so it works while the
+//! app runs (the runtime hot-reloads the file at its next scan) and a
+//! second process never trips the second-instance alert.
 
 use crate::config::{atomic_write, route_prefix_problem, Config, Route};
 use std::path::Path;
@@ -180,7 +180,11 @@ pub fn skill(home: &Path) -> String {
          - Use the route subcommands instead of editing config.json by hand so the\n\
          shared validation runs; an unparsable config blocks intake until repaired.\n\
          - Ask the user what they want to automate before changing routes, and show\n\
-         the final `slashie route list` afterwards.\n",
+         the final `slashie route list` afterwards.\n\
+         - Polling starts paused on a fresh install; route edits do nothing for\n\
+         intake until the operator enables `Polling` from the menu-bar icon's\n\
+         menu. `slashie --poll on|off` edits the same saved setting but only\n\
+         runs while no other Slashie instance holds the lock.\n",
         home.display()
     )
 }

@@ -31,6 +31,12 @@ Each start or resume begins with messages sent after that point. Pausing stops n
 
 Polling continues while the menu-bar app has no window open; the Mac may still sleep. A claimed message gets at most one execution attempt on the same host while its state is intact. A crash can leave the command or reply outcome uncertain. Check Feishu and the log before sending a fresh request, which can repeat local side effects.
 
+Commands in one conversation run in the order they were sent, one at a time; different conversations run in parallel. A conversation keeps at most a handful of commands queued behind the running one, and a bounded number of conversations hold queues at once — anything beyond that is left for a later scan within the recent window, and a message that ages out of that window before a slot frees is never run and never replied to. If a burst of commands goes unanswered, send a fresh one rather than assuming it is queued.
+
+## Data flow
+
+Message text travels from Feishu to the local command as environment variables (`SLASHIE_PROMPT`, `SLASHIE_ARGS`) and never leaves the machine except through the command itself. The command's output is the reply text sent back to the original Feishu message. The local log records IDs, durations, and outcomes — not message text or command output.
+
 ## Delivery and evidence
 
 | Milestone | Scope and evidence |

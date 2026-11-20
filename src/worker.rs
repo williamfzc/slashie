@@ -334,8 +334,15 @@ pub fn run_command_with(
     };
     let success = !timed_out && termination != "shutdown" && exit_code == Some(0);
 
+    let reply_text = if termination == "shutdown" {
+        // A quit killed this command (running or queued); that is not an
+        // ordinary command failure and must read as one to the user.
+        "Canceled: Slashie is shutting down.".to_string()
+    } else {
+        compose_reply(success, &stdout, &stderr, timed_out)
+    };
     Outcome {
-        reply_text: compose_reply(success, &stdout, &stderr, timed_out),
+        reply_text,
         termination,
         exit_code,
         duration_ms: started.elapsed().as_millis() as u64,

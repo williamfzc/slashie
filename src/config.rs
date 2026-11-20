@@ -229,11 +229,18 @@ impl Config {
 }
 
 /// Atomically persist JSON text: write temp file, sync, rename, sync dir.
+/// The file is user-only (0600): route commands and state may hold
+/// operator-sensitive material (DESIGN.md "Configuration and files").
 pub fn atomic_write(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
     let tmp = path.with_extension("json.tmp");
     {
-        use std::io::Write;
         let mut f = std::fs::File::create(&tmp)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
         f.write_all(text.as_bytes())?;
         f.sync_all()?;
     }
