@@ -372,18 +372,14 @@
     }
 
     // The agent-guidance prompt (menu-bar.md "Settings"): a fixed template
-    // naming the running CLI path and the route subcommands.
+    // naming the running CLI path; `--skill` carries the operating rules.
     function agentPrompt() {
       const cli = cliPath || "slashie";
       return [
         "You can configure my Slashie routes. Slashie runs slash commands from Feishu on this machine.",
-        "Ask me what I want to automate before changing anything, then work within these rules:",
-        `- Read the current routes: \`${cli} route list\` (prints JSON).`,
-        `- Add a route: \`${cli} route add <PREFIX> --cmd <COMMAND> [--dir <PATH>] [--timeout <SECS>] [--session chat]\`.`,
-        "- PREFIX is a unique slash token like /deploy. COMMAND is the shell program; it receives the message text in $SLASHIE_ARGS and $SLASHIE_PROMPT. Quote inputs where the command expects them.",
-        "- --session chat keeps one agent session per conversation and cannot combine with --dir.",
-        `- Remove a route: \`${cli} route remove <PREFIX>\`.`,
-        "Show me the final route list, remind me that changes apply at the next scan, and never edit config.json directly.",
+        `Run \`${cli} --skill\` first; it is the operating manual. Follow it.`,
+        "Ask me what I want to automate before changing anything.",
+        "Show me the final route list when you are done.",
       ].join("\n");
     }
 

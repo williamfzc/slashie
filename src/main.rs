@@ -57,6 +57,8 @@ fn print_help() {
                                fixture instead of the Lark CLI (verification).\n\
              --help            Print this help.\n\
              --version         Print the version.\n\
+             --skill           Print the agent skill document for operating\n\
+                               Slashie (routes, rules, and behavior).\n\
          \n\
          ROUTE SUBCOMMANDS:\n\
              Edit config.json routes offline; the running runtime applies\n\
@@ -111,6 +113,12 @@ fn main() {
             // Help and version exit before opening runtime files (DESIGN.md).
             "--help" | "-h" => {
                 print_help();
+                return;
+            }
+            // The agent-facing operating contract (cli.rs::skill); like the
+            // route subcommands it needs no lock and no transport.
+            "--skill" => {
+                print!("{}", crate::cli::skill(&runtime_home()));
                 return;
             }
             "--version" | "-V" => {

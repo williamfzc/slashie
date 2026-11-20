@@ -87,7 +87,7 @@ fn add(home: &Path, args: &mut impl Iterator<Item = String>) -> Result<String, S
         session,
     });
     save_config(home, &cfg)?;
-    Ok(format!("route {} added; restart Slashie to apply.", prefix))
+    Ok(format!("route {} added; applies at the next scan.", prefix))
 }
 
 fn remove(home: &Path, args: &mut impl Iterator<Item = String>) -> Result<String, String> {
@@ -102,7 +102,7 @@ fn remove(home: &Path, args: &mut impl Iterator<Item = String>) -> Result<String
     }
     save_config(home, &cfg)?;
     Ok(format!(
-        "route {} removed; restart Slashie to apply.",
+        "route {} removed; applies at the next scan.",
         prefix
     ))
 }
@@ -132,6 +132,57 @@ fn save_config(home: &Path, cfg: &Config) -> Result<(), String> {
         &serde_json::to_string_pretty(cfg).unwrap(),
     )
     .map_err(|e| format!("cannot write config.json: {}", e))
+}
+
+/// The agent-facing operating contract (DESIGN.md "Configuration and
+/// files"), SKILL.md-style so an agent that discovers the binary can teach
+/// itself how to operate Slashie.
+pub fn skill(home: &Path) -> String {
+    format!(
+        "---\n\
+         name: slashie\n\
+         description: Operate Slashie - inspect and edit the Feishu slash-command routes it runs locally.\n\
+         ---\n\
+         \n\
+         Slashie watches the user's Feishu chats for messages that start with a route\n\
+         prefix (like `/deploy`) and runs that route's shell command on this machine,\n\
+         then replies to the original message with the outcome.\n\
+         \n\
+         # Files\n\
+         \n\
+         - Runtime directory: {}\n\
+         - `config.json` in it holds all settings: routes, the poll interval, and\n\
+         the Lark CLI binding. `slashie.log` is the operational log.\n\
+         \n\
+         # Commands\n\
+         \n\
+         - `slashie route list` - print the route table as JSON.\n\
+         - `slashie route add <PREFIX> --cmd <COMMAND> [--dir <PATH>] [--timeout <SECS>] [--session chat]`\n\
+         - `slashie route remove <PREFIX>`\n\
+         \n\
+         # Rules\n\
+         \n\
+         - PREFIX is unique across routes, starts with `/`, and is a single token.\n\
+         - COMMAND is a shell program run with `/bin/sh -c`. It receives the message\n\
+         text in `$SLASHIE_ARGS` (text after the prefix) and `$SLASHIE_PROMPT` (that\n\
+         text plus the message source). Quote variables where the command expects\n\
+         them, e.g. `claude -p -- \"$SLASHIE_PROMPT\"`.\n\
+         - `--dir` sets the working directory (absolute or `~/...`, default home).\n\
+         - `--timeout` bounds the command in seconds (default 30).\n\
+         - `--session chat` keeps one agent session per Feishu conversation; the\n\
+         command then runs in a Slashie-owned workspace with `$SLASHIE_CONTINUE`\n\
+         set to `1` when it may resume. It cannot be combined with `--dir`.\n\
+         \n\
+         # Behavior\n\
+         \n\
+         - Route and interval edits apply at the next scan without restarting\n\
+         Slashie; the Lark CLI binding applies only at startup.\n\
+         - Use the route subcommands instead of editing config.json by hand so the\n\
+         shared validation runs; an unparsable config blocks intake until repaired.\n\
+         - Ask the user what they want to automate before changing routes, and show\n\
+         the final `slashie route list` afterwards.\n",
+        home.display()
+    )
 }
 
 #[cfg(test)]
@@ -274,6 +325,26 @@ mod tests {
         assert!(run(&home, &["add", "/x", "--cmd", "echo", "--wat"])
             .unwrap_err()
             .contains("--wat"));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn skill_document_names_the_runtime_and_contract() {
+        let home = temp_home("skill");
+        let doc = skill(&home);
+        assert!(doc.starts_with("---\nname: slashie"), "{}", doc);
+        assert!(doc.contains(&home.display().to_string()));
+        for needle in [
+            "route list",
+            "route add <PREFIX> --cmd <COMMAND>",
+            "route remove <PREFIX>",
+            "SLASHIE_ARGS",
+            "SLASHIE_PROMPT",
+            "--session chat",
+            "next scan",
+        ] {
+            assert!(doc.contains(needle), "missing {needle} in skill doc");
+        }
         std::fs::remove_dir_all(home).unwrap();
     }
 }
