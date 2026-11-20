@@ -42,7 +42,7 @@ The checkmark covers normal enabled and paused states. Show a read-only line abo
 | Condition | Copy |
 | --- | --- |
 | Starting or shutting down | `Starting…` or `Quitting…` |
-| Operator action needed | `Check Settings and restart`, `Sign in to Feishu and restart`, `Local state unavailable`, or `Could not save polling setting` |
+| Operator action needed | `Check Settings and restart`, `Sign in to Feishu and restart`, `Local state unavailable`, `Could not save polling setting`, or `Config rejected · using last valid settings` |
 | Latest reply failed or its outcome is uncertain | `Reply failed` or `Reply unconfirmed · Check Feishu` |
 | Polling is paused while accepted work remains | `Finishing accepted requests` |
 | Polling is retrying a transient failure | `Retrying · Feishu unavailable` or `Retrying · Rate limited` |
@@ -66,7 +66,7 @@ A route may set `"session": "chat"` in the configuration file to keep one agent 
 
 Under the route list, a `Configure with an agent` disclosure guides hand-off to a local agent instead of hand-editing. It explains that any local agent can edit routes with the [slashie CLI](DESIGN.md#configuration-and-files) while the app runs, offers `Copy agent prompt` with a ready-made instruction — naming the resolved CLI path and pointing the agent at `slashie --skill`, the printed operating contract — and shows a copyable example command. The window never runs the agent itself; the user reviews whatever the agent changed.
 
-Save validates the entire draft. Mark invalid fields in place, including blank commands and duplicate prefixes. If the configuration file cannot be parsed, show its path and disable Save until the file is repaired. On success, keep the window open and show `Saved. Applies at the next scan.` Closing the window leaves saved settings intact and discards unsaved edits. Preserve per-route working directories and timeouts when editing existing rows. Lark CLI and subprocess path options stay in the [shared configuration file](DESIGN.md#configuration-and-files).
+Save validates the entire draft. Mark invalid fields in place, including blank commands and duplicate prefixes. If the configuration file cannot be parsed, show its path and disable Save until the file is repaired. On success, keep the window open and show `Saved. Slashie picks it up within about <interval> seconds.` Closing the window leaves saved settings intact and discards unsaved edits. Preserve per-route working directories and timeouts when editing existing rows. Lark CLI and subprocess path options stay in the [shared configuration file](DESIGN.md#configuration-and-files).
 
 ## Acceptance
 

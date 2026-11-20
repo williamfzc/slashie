@@ -152,7 +152,9 @@ pub fn skill(home: &Path) -> String {
          \n\
          - Runtime directory: {}\n\
          - `config.json` in it holds all settings: routes, the poll interval, and\n\
-         the Lark CLI binding. `slashie.log` is the operational log.\n\
+         the Lark CLI binding. `state.json` records the polling on/off setting,\n\
+         durable per-message claims, and conversation session mappings.\n\
+         `slashie.log` is the operational log.\n\
          \n\
          # Commands\n\
          \n\

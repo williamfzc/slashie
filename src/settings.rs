@@ -19,12 +19,13 @@ use std::path::Path;
 pub struct DraftRoute {
     pub prefix: String,
     pub cmd: String,
-    /// Client-side row identity: true for rows the Settings window added
-    /// during this editing session. Such rows are new routes and never
-    /// inherit a dead row's dir/timeout/session. The file itself never
-    /// stores this; serde defaults it for any producer that omits it.
-    #[serde(default)]
-    pub is_new: bool,
+    /// Client-side row identity: the base-route index for rows the window
+    /// loaded, so an edited row keeps its dir/timeout/session even when its
+    /// prefix is renamed. Absent for rows added during this session, which
+    /// are new routes and never inherit a dead row's options. The file
+    /// itself never stores this; serde defaults it for other producers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -41,10 +42,11 @@ impl SettingsDraft {
             routes: cfg
                 .routes
                 .iter()
-                .map(|r| DraftRoute {
+                .enumerate()
+                .map(|(i, r)| DraftRoute {
                     prefix: r.prefix.clone(),
                     cmd: r.cmd.clone(),
-                    is_new: false,
+                    row_id: Some(i as u64),
                 })
                 .collect(),
         }
@@ -105,21 +107,12 @@ impl SettingsDraft {
         out.routes = self
             .routes
             .iter()
-            .enumerate()
-            .map(|(i, d)| {
+            .map(|d| {
                 // Preserve dir/timeout/session only for rows the window
-                // loaded: same position (an edited row, renamed prefix
-                // included) or the same prefix elsewhere. A row the window
-                // added is a new route and never inherits a dead row's
-                // options just because it reuses its prefix.
-                let preserved = if d.is_new {
-                    None
-                } else {
-                    base.routes
-                        .get(i)
-                        .filter(|r| r.prefix == d.prefix)
-                        .or_else(|| base.routes.iter().find(|r| r.prefix == d.prefix))
-                };
+                // loaded, matched by their stable row identity: a renamed
+                // row keeps its options, and a row added this session never
+                // inherits a dead row's options by reusing its prefix.
+                let preserved = d.row_id.and_then(|id| base.routes.get(id as usize));
                 Route {
                     prefix: d.prefix.clone(),
                     cmd: d.cmd.clone(),
@@ -194,7 +187,7 @@ mod tests {
                 .map(|(p, c)| DraftRoute {
                     prefix: p.to_string(),
                     cmd: c.to_string(),
-                    is_new: false,
+                    row_id: None,
                 })
                 .collect(),
         }
@@ -238,7 +231,11 @@ mod tests {
             timeout: Some(5),
             session: Some("chat".into()),
         });
-        let d = draft(30, &[("/ping", "echo new-ping"), ("/go", "echo new-go")]);
+        let mut d = draft(30, &[("/ping", "echo new-ping"), ("/go", "echo new-go")]);
+        // Rows the window loaded carry their base index; /go sits after
+        // the four stock presets.
+        d.routes[0].row_id = Some(0);
+        d.routes[1].row_id = Some(4);
         let out = d.apply_to(&base).unwrap();
         assert_eq!(out.poll_interval, 30);
         assert_eq!(out.routes[0].cmd, "echo new-ping");
@@ -249,6 +246,27 @@ mod tests {
         assert_eq!(out.routes[1].session.as_deref(), Some("chat"));
         // Fields the window does not edit survive.
         assert_eq!(out.process_path, base.process_path);
+    }
+
+    #[test]
+    fn renamed_row_keeps_options_new_row_never_inherits() {
+        let mut base = Config::default();
+        base.routes[0].session = Some("chat".into());
+        base.routes[0].timeout = Some(120);
+        // Rename row 0: same identity, different prefix.
+        let mut d = draft(20, &[("/claude2", "claude -p")]);
+        d.routes[0].row_id = Some(0);
+        let out = d.apply_to(&base).unwrap();
+        assert_eq!(out.routes[0].prefix, "/claude2");
+        assert_eq!(out.routes[0].session.as_deref(), Some("chat"));
+        assert_eq!(out.routes[0].timeout, Some(120));
+
+        // A NEW row reusing the old prefix inherits nothing.
+        let mut d2 = draft(20, &[("/ping", "echo pong"), ("/claude", "echo replaced")]);
+        d2.routes[1].row_id = None;
+        let out = d2.apply_to(&base).unwrap();
+        assert_eq!(out.routes[1].session, None, "new rows never inherit");
+        assert_eq!(out.routes[1].timeout, None);
     }
 
     #[test]

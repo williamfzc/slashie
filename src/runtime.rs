@@ -116,6 +116,7 @@ impl Runtime {
             Err(e) => (State::default(), Some(e.to_string()), false),
         };
 
+        let state_corrupt = state_fault.is_some();
         let blocked = config_fault.or(state_fault);
 
         let status = Arc::new(Mutex::new(crate::status::RuntimeStatus {
@@ -142,12 +143,19 @@ impl Runtime {
             fresh_install,
         };
 
-        // An empty identity means the host could not verify one (unconfigured
-        // startup); nothing is bound, so a later configured run binds fresh.
-        if identity_verified {
-            runtime.bind_identity();
+        // A failed state load blocks intake; writing defaults over the
+        // corrupt file would destroy the evidence and silently reset the
+        // operator's polling choice.
+        if !state_corrupt {
+            if identity_verified {
+                runtime.bind_identity();
+            }
+            runtime.settle_pending_as_interrupted();
+        } else {
+            runtime.status.lock().unwrap().operator_action =
+                Some(crate::status::OperatorFault::LocalStateUnavailable);
         }
-        runtime.settle_pending_as_interrupted();
+
         if let Some(on) = poll_override {
             let _ = runtime.apply_poll_setting(on);
         }

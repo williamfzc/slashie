@@ -259,9 +259,9 @@
     let nextRouteId = 0;
     let cliPath = "";
 
-    function routeRow(prefix, cmd, isNew = false) {
+    function routeRow(prefix, cmd, rowId = null) {
       const row = routes.insertRow();
-      row.dataset.isNew = isNew ? "1" : "0";
+      if (rowId != null) row.dataset.rowId = String(rowId);
       const routeId = ++nextRouteId;
       const prefixInput = document.createElement("input");
       prefixInput.value = prefix;
@@ -308,20 +308,28 @@
       });
     }
 
+    // Compare route content only: rowId is bookkeeping, not a user edit.
+    function draftKey(draft) {
+      return JSON.stringify({
+        pollInterval: draft.pollInterval,
+        routes: draft.routes.map(({ prefix, cmd }) => ({ prefix, cmd })),
+      });
+    }
+
     function collectDraft() {
       return {
         pollInterval: Number(interval.value),
         routes: [...routes.rows].map((row) => ({
           prefix: row.querySelector("input").value,
           cmd: row.querySelector("textarea").value,
-          isNew: row.dataset.isNew === "1",
+          rowId: row.dataset.rowId != null ? Number(row.dataset.rowId) : null,
         })),
       };
     }
 
     function syncControls() {
       editor.disabled = snapshot === null || busy;
-      save.disabled = editor.disabled || JSON.stringify(collectDraft()) === baseline;
+      save.disabled = editor.disabled || draftKey(collectDraft()) === baseline;
     }
 
     function edited() {
@@ -424,9 +432,9 @@
         if (!interval.value || !Array.isArray(settings.draft.routes)) {
           throw new Error("The app returned an invalid configuration.");
         }
-        for (const route of settings.draft.routes) routeRow(route.prefix, route.cmd);
+        settings.draft.routes.forEach((route, i) => routeRow(route.prefix, route.cmd, i));
         labelRoutes();
-        baseline = JSON.stringify(collectDraft());
+        baseline = draftKey(collectDraft());
         snapshot = settings.snapshot;
         report(`loaded ${settings.draft.routes.length} routes`);
       } catch (failure) {
@@ -441,7 +449,7 @@
     }
 
     addRoute.onclick = () => {
-      const prefixInput = routeRow("", "", true);
+      const prefixInput = routeRow("", "");
       labelRoutes();
       edited();
       prefixInput.focus();
@@ -470,11 +478,11 @@
         const result = await invoke("save_settings_cmd", { snapshot, draft });
         if (result === "Saved") {
           snapshot = null;
-          baseline = JSON.stringify(draft);
+          baseline = draftKey(draft);
           status.textContent = `Saved. Slashie picks it up within about ${draft.pollInterval}s.`;
           try {
             const settings = await readSettings();
-            if (JSON.stringify(settings.draft) !== baseline) {
+            if (draftKey(settings.draft) !== baseline) {
               throw new Error("The configuration changed after saving.");
             }
             snapshot = settings.snapshot;
