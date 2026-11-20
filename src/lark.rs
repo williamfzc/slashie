@@ -778,7 +778,6 @@ sys.exit(0)
             &["/usr/bin".to_string(), "/bin".to_string()],
             Arc::new(AtomicBool::new(false)),
         )
-        .with_timeout_ms(500)
     }
 
     fn tmp(name: &str) -> PathBuf {
@@ -911,6 +910,7 @@ sys.exit(0)
             t.reply("om_scopedeny", "pong"),
             Err(ReplyError::Rejected(m)) if m.contains("scope")
         ));
+        let t = t.with_timeout_ms(500);
         let started = std::time::Instant::now();
         assert!(matches!(
             t.reply("om_hang", "pong"),
