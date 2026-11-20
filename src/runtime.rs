@@ -52,6 +52,9 @@ pub struct Runtime {
     /// mailbox runner can call back into `process_job` without an `Arc`
     /// cycle (runtime -> mailboxes -> runner -> runtime).
     self_arc: Mutex<Option<std::sync::Weak<Runtime>>>,
+    /// True when this run created state.json: hosts use it to offer
+    /// first-run guidance (menu-bar.md).
+    pub fresh_install: bool,
 }
 
 pub fn error(msg: impl Into<String>) -> String {
@@ -120,6 +123,8 @@ impl Runtime {
             ..Default::default()
         }));
 
+        let fresh_install = matches!(load_or_init(&home), Ok(StateLoad::Created(_)));
+        let identity_verified = !identity.is_empty();
         let runtime = Runtime {
             config_mtime: Mutex::new(config_mtime(&home)),
             home,
@@ -134,9 +139,14 @@ impl Runtime {
             intake_blocked: Mutex::new(blocked),
             status,
             self_arc: Mutex::new(None),
+            fresh_install,
         };
 
-        runtime.bind_identity();
+        // An empty identity means the host could not verify one (unconfigured
+        // startup); nothing is bound, so a later configured run binds fresh.
+        if identity_verified {
+            runtime.bind_identity();
+        }
         runtime.settle_pending_as_interrupted();
         if let Some(on) = poll_override {
             let _ = runtime.apply_poll_setting(on);
@@ -245,6 +255,11 @@ impl Runtime {
     /// Recompute the derived status fields from current state.
     pub fn refresh_status(&self) {
         let mut status = self.status.lock().unwrap();
+        // A blocked intake needs the operator even when nothing else set a
+        // fault row; a more specific fault set earlier wins.
+        if status.operator_action.is_none() && self.is_intake_blocked() {
+            status.operator_action = Some(crate::status::OperatorFault::CheckSettingsAndRestart);
+        }
         status.finishing_accepted = {
             let st = self.state.lock().unwrap();
             !st.polling && st.waiting_count() > 0
@@ -407,6 +422,7 @@ impl Runtime {
         // Creation order, message ID as tiebreaker.
         eligible.sort_by(|a, b| (a.created_at_ms, &a.id).cmp(&(b.created_at_ms, &b.id)));
 
+        let eligible_count = eligible.len();
         let mut jobs = Vec::new();
         // Claims this scan has already made per conversation; mailbox
         // occupancy only moves at delivery, so admission counts them too.
@@ -481,6 +497,11 @@ impl Runtime {
 
         // Complete scan: record its end and prune settled claims that have
         // left the scan horizon.
+        self.logger.log(&format!(
+            "scan ok: {} eligible, {} admitted",
+            eligible_count,
+            jobs.len()
+        ));
         {
             let mut status = self.status.lock().unwrap();
             let mut st = self.state.lock().unwrap();
@@ -643,11 +664,11 @@ impl Runtime {
             }
         }));
 
-        // Re-read each cycle so a saved interval change applies without
-        // a restart (one scan of latency).
-        let interval =
-            std::time::Duration::from_secs(self.config.lock().unwrap().poll_interval.max(1));
         while !self.shutdown.load(Ordering::SeqCst) {
+            // Re-read each cycle so a saved interval change applies without
+            // a restart (one scan of latency).
+            let interval =
+                std::time::Duration::from_secs(self.config.lock().unwrap().poll_interval.max(1));
             match self.scan_once() {
                 Ok(jobs) if !jobs.is_empty() => self.mailboxes.deliver(jobs),
                 Ok(_) => {}
