@@ -65,6 +65,25 @@ fn chrono_millis_now() -> i64 {
 pub fn rfc3339_millis(ms: i64) -> String {
     let secs = ms.div_euclid(1000);
     let millis = ms.rem_euclid(1000);
+    format!("{}.{:03}Z", rfc3339_secs(secs), millis)
+}
+
+/// RFC 3339 with second precision (live search rejects fractional seconds).
+/// `floor` rounds down, `ceil` rounds up, so a [floor(start), ceil(end)]
+/// window keeps full coverage; exact-millisecond filtering stays in the
+/// runtime admission rules.
+pub fn rfc3339_secs_floor(ms: i64) -> String {
+    format!("{}Z", rfc3339_secs(ms.div_euclid(1000)))
+}
+
+pub fn rfc3339_secs_ceil(ms: i64) -> String {
+    format!(
+        "{}Z",
+        rfc3339_secs(ms.div_euclid(1000) + i64::from(ms.rem_euclid(1000) > 0))
+    )
+}
+
+fn rfc3339_secs(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let sod = secs.rem_euclid(86_400);
     let (h, m, s) = (sod / 3600, (sod % 3600) / 60, sod % 60);
@@ -79,10 +98,7 @@ pub fn rfc3339_millis(ms: i64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let mth = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if mth <= 2 { y + 1 } else { y };
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
-        y, mth, d, h, m, s, millis
-    )
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", y, mth, d, h, m, s)
 }
 
 #[cfg(test)]
@@ -94,6 +110,24 @@ mod tests {
         assert_eq!(rfc3339_millis(0), "1970-01-01T00:00:00.000Z");
         // 2026-11-19T14:00:00Z
         assert_eq!(rfc3339_millis(1_795_096_800_000), "2026-11-19T14:00:00.000Z");
+    }
+
+    #[test]
+    fn rfc3339_second_precision_rounds_outward() {
+        // Floor rounds down; ceil rounds up; whole seconds stay exact.
+        assert_eq!(rfc3339_secs_floor(1_795_096_800_000), "2026-11-19T14:00:00Z");
+        assert_eq!(rfc3339_secs_ceil(1_795_096_800_000), "2026-11-19T14:00:00Z");
+        assert_eq!(rfc3339_secs_floor(1_795_096_800_001), "2026-11-19T14:00:00Z");
+        assert_eq!(rfc3339_secs_ceil(1_795_096_800_001), "2026-11-19T14:00:01Z");
+        assert_eq!(rfc3339_secs_floor(1_795_096_809_999), "2026-11-19T14:00:09Z");
+        assert_eq!(rfc3339_secs_ceil(1_795_096_809_999), "2026-11-19T14:00:10Z");
+        // No fractional seconds anywhere (live search rejects them).
+        let f = rfc3339_secs_floor(1);
+        let c = rfc3339_secs_ceil(1);
+        assert_eq!(f, "1970-01-01T00:00:00Z");
+        assert_eq!(c, "1970-01-01T00:00:01Z");
+        assert!(!f.contains('.'), "{}", f);
+        assert!(!c.contains('.'), "{}", c);
     }
 
     #[test]

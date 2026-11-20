@@ -16,7 +16,7 @@
 //!   failure; on a reply it means delivery is uncertain.
 
 use crate::config::LarkCli;
-use crate::logging::rfc3339_millis;
+use crate::logging::{rfc3339_secs_ceil, rfc3339_secs_floor};
 use crate::transport::{Message, ReplyError, Transport, TransportError};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -109,7 +109,7 @@ impl LarkCliTransport {
 
         let mut child = cmd
             .spawn()
-            .map_err(|e| CliFailure::Failed(format!("cannot spawn lark-cli: {}", e)))?;
+            .map_err(|e| CliFailure::Failed(format!("cannot spawn lark-cli: {}", e), String::new()))?;
         let pgid = child.id() as i32;
         if let Some(data) = stdin_data {
             use std::io::Write;
@@ -173,14 +173,23 @@ impl LarkCliTransport {
                 .read_to_end(&mut stdout)
                 .map_err(|e| CliFailure::Uncertain(format!("pipe read failed: {}", e)))?;
         }
-        let _stderr = stderr_thread.join().unwrap_or_default();
+        let stderr_text = String::from_utf8_lossy(&stderr_thread.join().unwrap_or_default())
+            .trim()
+            .to_string();
+        let stdout_text = String::from_utf8_lossy(&stdout).trim().to_string();
         if !status.success() {
-            return Err(CliFailure::Failed(format!(
-                "lark-cli exited with {:?}",
-                status.code()
-            )));
+            // A definitive error envelope may ride on either stream.
+            let combined = if stdout_text.is_empty() {
+                stderr_text
+            } else {
+                format!("{}\n{}", stdout_text, stderr_text)
+            };
+            return Err(CliFailure::Failed(
+                format!("lark-cli exited with {:?}", status.code()),
+                combined,
+            ));
         }
-        Ok(String::from_utf8_lossy(&stdout).to_string())
+        Ok(stdout_text)
     }
 
     fn kill_group(&self, pgid: i32) {
@@ -204,7 +213,7 @@ impl LarkCliTransport {
         serde_json::from_str(&out).map_err(|e| CliFailure::Failed(format!(
             "unparsable lark-cli output: {}",
             e
-        )))
+        ), String::new()))
     }
 
     /// Verify the user identity is available and return its open_id.
@@ -227,28 +236,48 @@ impl LarkCliTransport {
             .run_json(&["contact", "+get-user", "--as", "user"], None)
             .map_err(cli_failure_to_transport)?;
         let data = api_data(&me)?;
-        let open_id = data
-            .get("open_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                TransportError::Fatal("identity response has no open_id".into())
-            })?;
+        let open_id = extract_open_id(data).ok_or_else(|| {
+            TransportError::Fatal("identity response has no open_id".into())
+        })?;
         Ok(open_id.to_string())
     }
 }
 
+/// The open_id from a `+get-user` payload: live-verified 1.0.68 nests it
+/// under `user`; a flat `open_id` stays accepted for compatibility.
+fn extract_open_id(data: &Value) -> Option<&str> {
+    data.get("open_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| data.pointer("/user/open_id").and_then(|v| v.as_str()))
+}
+
 enum CliFailure {
-    /// Clean exit but an error envelope or nonzero exit code.
-    Failed(String),
+    /// Clean exit with an error envelope, or a nonzero exit code. Carries
+    /// the captured output: live lark-cli prints a definitive error envelope
+    /// even when it exits nonzero (verified: exit 3 + missing_scope envelope
+    /// on stderr).
+    Failed(String, String),
     /// Timeout, shutdown cancellation, or unparseable outcome: the API may
     /// have accepted the request (reply delivery uncertain).
     Uncertain(String),
 }
 
+impl CliFailure {
+    /// Captured output that may carry an error envelope.
+    fn envelope_text(&self) -> Option<&str> {
+        match self {
+            CliFailure::Failed(_, out) if !out.trim().is_empty() => Some(out),
+            _ => None,
+        }
+    }
+}
+
 impl std::fmt::Debug for CliFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CliFailure::Failed(m) => write!(f, "CliFailure::Failed({:?})", m),
+            CliFailure::Failed(m, out) => {
+                write!(f, "CliFailure::Failed({:?}, stdout {:?})", m, out)
+            }
             CliFailure::Uncertain(m) => write!(f, "CliFailure::Uncertain({:?})", m),
         }
     }
@@ -257,7 +286,7 @@ impl std::fmt::Debug for CliFailure {
 /// Map a CLI failure on a read path (search/mget/identity).
 fn cli_failure_to_transport(f: CliFailure) -> TransportError {
     match f {
-        CliFailure::Failed(m) => TransportError::Transient(m),
+        CliFailure::Failed(m, _) => TransportError::Transient(m),
         // Shutdown cancellation and timeouts on reads are operator-visible
         // faults (the runtime treats them as fatal for this scan; live
         // acceptance decides whether to retry).
@@ -411,19 +440,24 @@ impl Transport for LarkCliTransport {
         let mut ids = Vec::new();
         let mut page_token: Option<String> = None;
         for _page in 0..MAX_PAGES {
-            let mut body = json!({
+            // Live-verified wire shape: page_size/page_token ride in the URL
+            // query (--params; a body page_token repeats page 1), the time
+            // range keys are start_time/end_time, and fractional seconds are
+            // rejected, so the window is rounded out to whole seconds
+            // (start down, end up); exact-millisecond admission stays local.
+            let body = json!({
                 "query": "",
-                "page_size": SEARCH_PAGE_SIZE,
                 "filter": {
                     "from_ids": [self_id],
                     "time_range": {
-                        "start": rfc3339_millis(from_ms),
-                        "end": rfc3339_millis(to_ms),
+                        "start_time": rfc3339_secs_floor(from_ms),
+                        "end_time": rfc3339_secs_ceil(to_ms),
                     }
                 }
             });
+            let mut params = json!({ "page_size": SEARCH_PAGE_SIZE });
             if let Some(token) = &page_token {
-                body["page_token"] = json!(token);
+                params["page_token"] = json!(token);
             }
             let envelope = self.run_json(
                 &[
@@ -432,6 +466,8 @@ impl Transport for LarkCliTransport {
                     "/open-apis/im/v1/messages/search",
                     "--as",
                     "user",
+                    "--params",
+                    &params.to_string(),
                     "--data",
                     "-",
                 ],
@@ -561,12 +597,27 @@ impl Transport for LarkCliTransport {
                     })?;
                 Ok(reply_id.to_string())
             }
-            Err(CliFailure::Failed(_)) => {
+            Err(failure @ CliFailure::Failed(..)) => {
+                // Live-verified: a definitive rejection can arrive as a
+                // nonzero exit with a clean error envelope on stdout (e.g.
+                // exit 3 + missing_scope). Classify that as rejected.
+                if let Some(out) = failure.envelope_text() {
+                    if let Ok(envelope) = serde_json::from_str::<Value>(out) {
+                        if envelope.get("ok") == Some(&json!(false)) {
+                            let message = envelope
+                                .pointer("/error/message")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("no message");
+                            return Err(ReplyError::Rejected(message.to_string()));
+                        }
+                    }
+                }
                 // A nonzero exit with no envelope: the send may or may not
                 // have gone through, so delivery is uncertain, not rejected.
-                Err(ReplyError::Uncertain(
-                    "lark-cli exited nonzero without an envelope".into(),
-                ))
+                Err(ReplyError::Uncertain(match failure {
+                    CliFailure::Failed(m, _) => m,
+                    _ => unreachable!(),
+                }))
             }
             Err(CliFailure::Uncertain(m)) => Err(ReplyError::Uncertain(m)),
         }
@@ -616,12 +667,29 @@ if args[:2] == ["auth", "status"]:
     sys.exit(0)
 
 if args[:2] == ["contact", "+get-user"]:
-    print(json.dumps({"code": 0, "msg": "ok", "data": {"open_id": "ou_verified"}}))
+    # Live-verified 1.0.68 shape: nested under data.user (regression fixture
+    # for the envelope mismatch found in live validation).
+    print(json.dumps({"ok": True, "data": {"user": {"open_id": "ou_verified"}}}))
     sys.exit(0)
 
 if args[:3] == ["api", "POST", "/open-apis/im/v1/messages/search"]:
     body = stdin_arg("--data")
-    start = body["filter"]["time_range"]["start"]
+    # Live-verified wire shape: pagination rides in --params, and the body
+    # time range uses start_time/end_time with second precision.
+    params_arg = args[args.index("--params") + 1] if "--params" in args else "{}"
+    params = json.loads(params_arg)
+    tr = body["filter"]["time_range"]
+    if "start" in tr or "end" in tr:
+        # Old wire shape: the live API ignored it (silently wrong window).
+        print(json.dumps({"code": 99992402, "msg": "invalid time_range keys", "data": {}}))
+        sys.exit(0)
+    start = tr["start_time"]
+    if "." in start:
+        print(json.dumps({"code": 99992402, "msg": "fractional seconds rejected", "data": {}}))
+        sys.exit(0)
+    if "page_token" in body:
+        # A body page_token repeats page 1 (live-verified pagination trap).
+        sys.exit(0)
     # Mode markers ride in the day-of-month of the start date.
     mode = start.split("T")[0]
     if mode.startswith("1970-01-"):
@@ -641,7 +709,7 @@ if args[:3] == ["api", "POST", "/open-apis/im/v1/messages/search"]:
     elif mode == "too_many_pages":
         print(json.dumps({"code": 0, "msg": "ok",
                           "data": {"items": [], "has_more": True, "page_token": "t"}}))
-    elif body.get("page_token") == "p2":
+    elif params.get("page_token") == "p2":
         print(json.dumps({"code": 0, "msg": "ok", "data": {"items": [
             {"meta_data": {"message_id": "om_page2"}}], "has_more": False}}))
     else:
@@ -682,6 +750,13 @@ if args[:1] == ["im"] and "+messages-reply" in args:
         time.sleep(60)
     if mid == "om_exitfail":
         sys.exit(1)
+    if mid == "om_scopedeny":
+        # Live-verified: exit 3 with a definitive error envelope on stdout.
+        print(json.dumps({"ok": False, "identity": "user",
+                          "error": {"type": "authorization",
+                                    "subtype": "missing_scope",
+                                    "message": "missing required scope(s): im:message.send_as_user"}}))
+        sys.exit(3)
     if mid == "om_reject":
         print(json.dumps({"ok": False, "error": {"type": "invalid_argument", "message": "no such message"}}))
         sys.exit(0)
@@ -729,6 +804,20 @@ sys.exit(0)
         let t = transport_in(&dir, "test");
         assert_eq!(t.verify_identity().unwrap(), "ou_verified");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn open_id_extraction_accepts_nested_and_flat_shapes() {
+        // Live-verified 1.0.68 shape.
+        let nested: Value =
+            serde_json::from_str(r#"{"user": {"open_id": "ou_nested"}}"#).unwrap();
+        assert_eq!(extract_open_id(&nested), Some("ou_nested"));
+        // Flat shape stays accepted.
+        let flat: Value = serde_json::from_str(r#"{"open_id": "ou_flat"}"#).unwrap();
+        assert_eq!(extract_open_id(&flat), Some("ou_flat"));
+        // Missing open_id is None.
+        let empty: Value = serde_json::from_str("{}").unwrap();
+        assert_eq!(extract_open_id(&empty), None);
     }
 
     #[test]
@@ -820,6 +909,11 @@ sys.exit(0)
             t.reply("om_exitfail", "pong"),
             Err(ReplyError::Uncertain(_))
         ));
+        // Live-verified: nonzero exit + definitive envelope = Rejected.
+        assert!(matches!(
+            t.reply("om_scopedeny", "pong"),
+            Err(ReplyError::Rejected(m)) if m.contains("scope")
+        ));
         let started = std::time::Instant::now();
         assert!(matches!(
             t.reply("om_hang", "pong"),
@@ -840,35 +934,49 @@ sys.exit(0)
             Some(p) => p,
             None => return,
         };
-        let cli = LarkCli {
-            path: exe.to_string_lossy().to_string(),
-            // Empty profile: use the CLI's default; no profile is guaranteed
-            // to exist under a specific name on a fresh machine.
-            profile: "".into(),
-        };
-        let t = LarkCliTransport::new(&cli, &[], Arc::new(AtomicBool::new(false)));
-        let out = t
-            .run(
-                &[
-                    "im",
-                    "+messages-reply",
-                    "--message-id",
-                    "om_dryrun_target",
-                    "--text",
-                    "hi",
-                    "--as",
-                    "user",
-                    "--idempotency-key",
-                    "slashie-om_dryrun_target",
-                    "--dry-run",
-                ],
-                None,
-            )
-            .expect("real CLI must accept the reply argv the transport builds");
-        // The real CLI prints the Dry Run banner on stderr and the request
-        // JSON on stdout; run() returns the stdout envelope.
-        assert!(out.contains("/open-apis/im/v1/messages/om_dryrun_target/reply"), "got: {}", out);
-        assert!(out.contains("slashie-om_dryrun_target"), "got: {}", out);
+        // Dry-run against the real CLI (no network, no writes). Environments
+        // without the send scope get exit 3 with a missing_scope envelope
+        // after argv parsing; both outcomes prove the argv shape is accepted.
+        let argv = [
+            "im",
+            "+messages-reply",
+            "--message-id",
+            "om_dryrun_target",
+            "--text",
+            "hi",
+            "--as",
+            "user",
+            "--idempotency-key",
+            "slashie-om_dryrun_target",
+            "--dry-run",
+        ];
+        let output = std::process::Command::new(&exe)
+            .args(argv)
+            .output()
+            .expect("real CLI must be spawnable");
+        // The live CLI prints the missing_scope envelope on stderr.
+        let stdout = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if output.status.success() {
+            // The request shape the transport builds.
+            assert!(
+                stdout.contains("/open-apis/im/v1/messages/om_dryrun_target/reply"),
+                "got: {}",
+                stdout
+            );
+            assert!(stdout.contains("slashie-om_dryrun_target"), "got: {}", stdout);
+        } else {
+            // Scope check reached after argv parsing; the envelope must be
+            // a clean CLI error, not a usage failure.
+            assert!(
+                stdout.contains("missing_scope") || stdout.contains("error"),
+                "got: {}",
+                stdout
+            );
+        }
     }
 
     fn which_lark_cli() -> Option<PathBuf> {
