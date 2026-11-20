@@ -16,9 +16,14 @@ rfd = { version = "0.15", optional = true }
 [build-dependencies]
 tauri-build = { version = "2", optional = true , features = [] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Prevents App Nap from suspending the polling runtime while the menu bar app
+# has no visible window (see src/app/mod.rs).
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = ["NSProcessInfo", "NSString"] }
+
 [features]
 default = []
-tray = ["dep:tauri", "dep:tauri-build", "dep:rfd"]
+tray = ["dep:tauri", "dep:tauri-build", "dep:rfd", "dep:objc2-foundation"]
 
 [[bin]]
 name = "slashie"

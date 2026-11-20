@@ -3450,6 +3450,7 @@ name = "slashie"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "objc2-foundation",
  "rfd",
  "serde",
  "serde_json",

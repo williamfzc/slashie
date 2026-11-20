@@ -7,8 +7,8 @@ use crate::config::{Config, Route, DEFAULT_TIMEOUT_SECS};
 use crate::logging::{now_ms, Logger};
 use crate::state::{load_or_init, save, ClaimStatus, State, StateLoad};
 use crate::transport::{Transport, TransportError};
-use crate::worker::{build_inputs, run_command};
-use std::path::PathBuf;
+use crate::worker::{build_inputs, run_command_with, SessionEnv};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
@@ -413,12 +413,40 @@ impl Runtime {
                 ));
             }
         }
-        let (args, prompt) = build_inputs(&job.route.prefix, &job.message);
+        let mut session = SessionEnv {
+            chat_id: job.message.chat_id.clone(),
+            ..SessionEnv::default()
+        };
+        if job.route.session.as_deref() == Some("chat") {
+            if session.chat_id.is_empty() {
+                self.logger.log(&format!(
+                    "session chat requested for {} but the message has no chat id",
+                    job.message.id
+                ));
+            } else {
+                let dir = chat_workspace(&self.home, &session.chat_id);
+                match ensure_chat_workspace(&dir) {
+                    Ok(()) => {
+                        session.continuing = self
+                            .state
+                            .lock()
+                            .unwrap()
+                            .has_chat_session(&session.chat_id, &job.route.prefix);
+                        session.dir = Some(dir);
+                    }
+                    Err(e) => self.logger.log(&format!(
+                        "cannot create chat workspace for {}: {}",
+                        job.message.id, e
+                    )),
+                }
+            }
+        }
+        let inputs = build_inputs(&job.route.prefix, &job.message);
         let timeout_secs = job.route.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS);
-        let outcome = run_command(
+        let outcome = run_command_with(
             &job.route,
-            &args,
-            &prompt,
+            &inputs,
+            &session,
             &self.config.process_path,
             &home_dir(),
             self.shutdown.clone(),
@@ -463,6 +491,11 @@ impl Runtime {
         let outcome_code = format!("{}:{}", outcome.termination, reply_state);
         {
             let mut st = self.state.lock().unwrap();
+            // A successful run leaves a resumable agent session in the chat
+            // workspace; remember it before the durable settle.
+            if session.dir.is_some() && outcome.exit_code == Some(0) {
+                st.record_chat_session(&session.chat_id, &job.route.prefix, now_ms());
+            }
             st.settle_claim(&job.message.id, now_ms(), &outcome_code);
             if let Err(e) = save(&self.home, &st) {
                 self.logger.log(&format!(
@@ -519,6 +552,33 @@ impl Runtime {
     }
 }
 
+/// Stable per-chat workspace used when a route opts into `session: "chat"`.
+/// Feishu chat IDs are `oc_*`; sanitize defensively so the path stays inside
+/// the runtime directory.
+fn chat_workspace(home: &Path, chat_id: &str) -> PathBuf {
+    let key: String = chat_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    home.join("chats").join(key)
+}
+
+fn ensure_chat_workspace(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 fn home_dir() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
 }
@@ -543,6 +603,7 @@ mod tests {
             sender: sender.into(),
             created_at_ms: ts,
             chat_type: "p2p".into(),
+            chat_id: "oc_test".into(),
             text: text.map(|s| s.into()),
             top_level,
             recalled,
@@ -570,6 +631,15 @@ mod tests {
         fixture: MockFixture,
         boundary_ms: i64,
     ) -> (Runtime, Arc<MockTransport>, PathBuf) {
+        init_rt_with_config(name, fixture, boundary_ms, Config::default())
+    }
+
+    fn init_rt_with_config(
+        name: &str,
+        fixture: MockFixture,
+        boundary_ms: i64,
+        config: Config,
+    ) -> (Runtime, Arc<MockTransport>, PathBuf) {
         let home = test_home(name);
         let mock = Arc::new(MockTransport::new(fixture));
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -577,7 +647,7 @@ mod tests {
         let rt = Runtime::init(
             home.clone(),
             LoadedConfig {
-                config: Config::default(),
+                config,
                 fault: None,
             },
             mock.clone(),
@@ -855,6 +925,67 @@ mod tests {
         rt.apply_poll_setting(false).unwrap();
         assert!(rt.status.lock().unwrap().last_successful_scan.is_none());
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn chat_session_continues_only_within_the_same_chat() {
+        let now = now_ms();
+        let boundary = now - 60_000;
+        let config = Config {
+            routes: vec![Route {
+                prefix: "/claude".into(),
+                cmd: "printf '%s|%s' \"$SLASHIE_CONTINUE\" \"$SLASHIE_CHAT\" > \"$SLASHIE_SESSION_DIR/state\"".into(),
+                dir: None,
+                timeout: Some(10),
+                session: Some("chat".into()),
+            }],
+            ..Config::default()
+        };
+        let (rt, _, home) =
+            init_rt_with_config("chat_session", fixture_with(vec![]), boundary, config);
+        let route = rt.config.routes[0].clone();
+        let message = |id: &str, chat: &str| {
+            let mut m = mkmsg(
+                id,
+                now - 1000,
+                "ou_self",
+                Some("/claude hello"),
+                true,
+                false,
+            );
+            m.chat_id = chat.into();
+            m
+        };
+        let read = |chat: &str| {
+            std::fs::read_to_string(chat_workspace(&home, chat).join("state")).unwrap()
+        };
+
+        rt.process_job(Job {
+            message: message("om_one_a", "oc_one"),
+            route: route.clone(),
+        });
+        assert_eq!(read("oc_one"), "0|oc_one");
+        rt.process_job(Job {
+            message: message("om_one_b", "oc_one"),
+            route: route.clone(),
+        });
+        assert_eq!(read("oc_one"), "1|oc_one");
+        rt.process_job(Job {
+            message: message("om_two_a", "oc_two"),
+            route: route.clone(),
+        });
+        assert_eq!(read("oc_two"), "0|oc_two");
+
+        let st = rt.state.lock().unwrap();
+        assert!(st.has_chat_session("oc_one", "/claude"));
+        assert!(st.has_chat_session("oc_two", "/claude"));
+        let on_disk = match load_or_init(&home).unwrap() {
+            StateLoad::Loaded(s) => s,
+            StateLoad::Created(_) => panic!("state should exist"),
+        };
+        assert_eq!(on_disk.chat_sessions.len(), 2);
+        drop(st);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

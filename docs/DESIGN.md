@@ -24,7 +24,7 @@ Give each host a control handle for status, polling changes, and shutdown. A coo
 
 The macOS bundle starts in menu-bar mode. `--headless` selects foreground mode before Tauri initializes. A headless build uses foreground mode by default. `--help` and `--version` exit before opening runtime files. The headless control command `--poll on|off` updates the same persisted polling setting as the menu under the lock, then exits. A headless lock conflict reports an error and exits.
 
-Menu Quit, Cmd+Q, and SIGINT/SIGTERM request shared shutdown. The menu-bar host exits after the runtime drains. Closing Settings only hides its window and leaves the runtime running. Shutdown stops intake, cancels active Feishu calls, terminates and reaps the active command group, and releases the lock after cleanup. Abandoned claims remain consumed. Canceling a request after Feishu may have accepted it leaves delivery uncertain.
+Menu Quit, Cmd+Q, and SIGINT/SIGTERM request shared shutdown. The menu-bar host exits after the runtime drains. Closing Settings only hides its window and leaves the runtime running. The host holds a user-initiated activity token so App Nap cannot suspend polling while no window is visible; idle system sleep is still allowed. Shutdown stops intake, cancels active Feishu calls, terminates and reaps the active command group, and releases the lock after cleanup. Abandoned claims remain consumed. Canceling a request after Feishu may have accepted it leaves delivery uncertain.
 
 ### Desktop build
 
@@ -62,7 +62,28 @@ The search shortcut projects out placement fields and can report successful exit
 
 ## Command execution
 
-Run the trusted route program with `/bin/sh -c`. Pass message data through quoted `SLASHIE_ARGS` or `SLASHIE_PROMPT` values. The prompt is the argument text, a blank line, and the source. The shell program comes entirely from the local configuration.
+Run the trusted route program with `/bin/sh -c`. Pass message data through the environment variables below. The prompt is the argument text, a blank line, and the source. The shell program comes entirely from the local configuration.
+
+| Variable | Value |
+| --- | --- |
+| `SLASHIE_ARGS` | Argument text after the prefix, with internal line breaks preserved. |
+| `SLASHIE_PROMPT` | Arguments, a blank line, and the source description. |
+| `SLASHIE_ID` | Source message ID. |
+| `SLASHIE_LINK` | Best verified source link, or an empty string. |
+| `SLASHIE_CONTEXT` | Source description: message ID, chat ID and type, link, and sender. |
+| `SLASHIE_CHAT` | Feishu chat ID, or empty when the transport cannot provide one. |
+| `SLASHIE_SESSION_DIR` | Chat workspace when the route has `session: "chat"`; otherwise empty. |
+| `SLASHIE_CONTINUE` | `1` when that chat route may resume its agent session; otherwise `0`. |
+
+Quote values that may contain whitespace. Commands consuming message data should expand the variables in quotes. The runtime never interpolates message text into the shell program.
+
+### Chat sessions
+
+A route with `"session": "chat"` keeps one agent conversation per Feishu chat. It runs in `~/.slashie/chats/<chat-id>/`, created with user-only permissions. `dir` is not allowed on such a route because the workspace must stay stable for the agent's own session lookup.
+
+The first successful command for a `(chat, route)` pair records that mapping in `state.json`. Later commands are told to resume: `SLASHIE_CONTINUE=1`, and the stock agent routes call `--continue` or `exec resume --last` in the same workspace. The agent CLI owns the actual session and its ID; Slashie keeps only the stable workspace and the resume decision.
+
+A different Feishu chat gets a different workspace, so it starts fresh. A failed first command does not create the mapping. To reset an existing chat, stop Slashie, delete `chats/<chat-id>/`, and remove that chat's entries from `state.json`; the next command starts a new agent session. If the agent's own session store is deleted, the resume command fails and the reply carries the diagnostic.
 
 Close the command's stdin pipe writer to signal EOF. Give each subprocess its own Unix process group. Apply a bounded deadline to Feishu calls and each route's configured timeout to its command. On timeout, shutdown, or ordinary exit with surviving group members, send SIGTERM to the group, wait up to two seconds, then SIGKILL remaining members. Reap the direct child. A child that leaves the group is outside this guarantee. Bound the final pipe drain in case a detached child holds a pipe open. [Rust Unix process groups](https://doc.rust-lang.org/std/os/unix/process/trait.CommandExt.html#tymethod.process_group)
 
@@ -78,19 +99,25 @@ Read and validate configuration once at launch. Configure the Lark CLI executabl
   "process_path": ["/usr/bin", "/bin", "/usr/sbin", "/sbin"],
   "poll_interval": 20,
   "routes": [
-    { "prefix": "/ping", "cmd": "echo pong" }
+    { "prefix": "/ping", "cmd": "echo pong" },
+    {
+      "prefix": "/claude",
+      "cmd": "if [ \"$SLASHIE_CONTINUE\" = 1 ]; then claude -p --continue -- \"$SLASHIE_PROMPT\"; else claude -p -- \"$SLASHIE_PROMPT\"; fi",
+      "session": "chat"
+    }
   ]
 }
 ```
 
-On initial setup, the stock configuration includes `/ping` (replies `pong`), `/pi` (Pi), `/claude` (Claude Code), and `/codex` (Codex). These are editable routes. Start with polling paused. Put the installed tools and any required runtime, such as Node, in `process_path`. The agent routes forward the question and source metadata. Reading conversation history requires a separate context tool.
+On initial setup, the stock configuration includes `/ping` (replies `pong`), `/pi` (Pi), `/claude` (Claude Code), and `/codex` (Codex). These are editable routes. Start with polling paused. Put the installed tools and any required runtime, such as Node, in `process_path`. The three agent routes use `session: "chat"` and switch to the agent's resume form when `SLASHIE_CONTINUE` is `1`.
 
-`poll_interval` is 10, 20, 30, or 60 seconds and defaults to 20. Each prefix is a unique slash-prefixed token. Each `cmd` is a nonempty shell program. An optional route `dir` is an absolute path or starts with `~/`. It defaults to the user's home directory. An optional `timeout` is a positive integer in seconds, defaulting to 30. `process_path` contains ordered absolute directories and defaults to the example.
+`poll_interval` is 10, 20, 30, or 60 seconds and defaults to 20. Each prefix is a unique slash-prefixed token. Each `cmd` is a nonempty shell program. An optional route `dir` is an absolute path or starts with `~/`. It defaults to the user's home directory. An optional `timeout` is a positive integer in seconds, defaulting to 30. An optional `session` may be `"chat"` for one agent session per Feishu chat; it cannot be combined with `dir`. `process_path` contains ordered absolute directories and defaults to the example.
 
 | File | Source of truth |
 | --- | --- |
 | `config.json` | Polling interval, CLI and path settings, and route definitions. Restart after edits. |
-| `state.json` | Polling setting, identity binding, latest completed scan end, and consumed IDs. |
+| `state.json` | Polling setting, identity binding, latest completed scan end, consumed IDs, and the chat-to-session mapping. |
+| `chats/<chat-id>/` | Per-chat agent workspace for routes with `session: "chat"`. User-only permissions. |
 | `app.lock` | Instance ownership via a held descriptor. |
 | `slashie.log` | Timestamps, IDs, durations, and outcomes. Rotate at 2 MiB and keep one previous log. |
 

@@ -26,19 +26,48 @@ pub struct Outcome {
 
 /// Message data passed to the shell. `args` is the text after the slash
 /// command with internal line breaks preserved. `prompt` is that text, a
-/// blank line, and the source context.
-pub fn build_inputs(route_prefix: &str, msg: &Message) -> (String, String) {
+/// blank line, and the source context. `source` is also exposed as
+/// `SLASHIE_CONTEXT`.
+pub struct CommandInputs {
+    pub args: String,
+    pub prompt: String,
+    pub source: String,
+    pub id: String,
+    pub link: String,
+}
+
+pub fn build_inputs(route_prefix: &str, msg: &Message) -> CommandInputs {
     let text = msg.text.clone().unwrap_or_default();
     let args = text
         .split_once(route_prefix)
         .map(|(_, rest)| rest.to_string())
         .unwrap_or_default();
     let mut source = format!("message: {}", msg.id);
+    if !msg.chat_id.is_empty() {
+        source.push_str(&format!("\nchat: {} ({})", msg.chat_id, msg.chat_type));
+    }
     if let Some(link) = &msg.link {
         source.push_str(&format!("\nlink: {}", link));
     }
+    source.push_str(&format!("\nsender: {}", msg.sender));
     let prompt = format!("{}\n\n{}", args, source);
-    (args, prompt)
+    CommandInputs {
+        args,
+        prompt,
+        source,
+        id: msg.id.clone(),
+        link: msg.link.clone().unwrap_or_default(),
+    }
+}
+
+/// Session routing for one command. `dir` is the per-chat workspace when the
+/// route opted into `session: "chat"`; `continuing` says that this chat route
+/// already completed a command and may resume its agent session.
+#[derive(Debug, Clone, Default)]
+pub struct SessionEnv {
+    pub chat_id: String,
+    pub dir: Option<std::path::PathBuf>,
+    pub continuing: bool,
 }
 
 /// Build the reply text per the product contract: stdout on success, a short
@@ -85,12 +114,40 @@ fn kill_process_group(pgid: i32, sig: i32) {
     }
 }
 
-/// Run the route command. `shutdown` is polled so shutdown can stop intake,
-/// terminate the active group, and reap it.
+/// Compatibility wrapper used by command-level tests and callers without a
+/// chat session.
+#[cfg(test)]
 pub fn run_command(
     route: &Route,
     args: &str,
     prompt: &str,
+    process_path: &[String],
+    home_dir: &str,
+    shutdown: Arc<AtomicBool>,
+) -> Outcome {
+    let inputs = CommandInputs {
+        args: args.to_string(),
+        prompt: prompt.to_string(),
+        source: String::new(),
+        id: String::new(),
+        link: String::new(),
+    };
+    run_command_with(
+        route,
+        &inputs,
+        &SessionEnv::default(),
+        process_path,
+        home_dir,
+        shutdown,
+    )
+}
+
+/// Run the route command with the message and session context. `shutdown` is
+/// polled so shutdown can stop intake, terminate the active group, and reap it.
+pub fn run_command_with(
+    route: &Route,
+    inputs: &CommandInputs,
+    session: &SessionEnv,
     process_path: &[String],
     home_dir: &str,
     shutdown: Arc<AtomicBool>,
@@ -100,20 +157,40 @@ pub fn run_command(
 
     let mut cmd = Command::new("/bin/sh");
     cmd.arg("-c").arg(&route.cmd);
-    cmd.env("SLASHIE_ARGS", args);
-    cmd.env("SLASHIE_PROMPT", prompt);
+    cmd.env("SLASHIE_ARGS", &inputs.args);
+    cmd.env("SLASHIE_PROMPT", &inputs.prompt);
+    cmd.env("SLASHIE_ID", &inputs.id);
+    cmd.env("SLASHIE_LINK", &inputs.link);
+    cmd.env("SLASHIE_CONTEXT", &inputs.source);
+    cmd.env("SLASHIE_CHAT", &session.chat_id);
+    cmd.env(
+        "SLASHIE_CONTINUE",
+        if session.continuing { "1" } else { "0" },
+    );
+    cmd.env(
+        "SLASHIE_SESSION_DIR",
+        session
+            .dir
+            .as_ref()
+            .map(|d| d.to_string_lossy().to_string())
+            .unwrap_or_default(),
+    );
     if !process_path.is_empty() {
         if let Ok(paths) = std::env::join_paths(process_path) {
             cmd.env("PATH", paths);
         }
     }
-    let cwd = match &route.dir {
-        Some(d) if d.starts_with("~/") => {
-            let expanded = format!("{}/{}", home_dir.trim_end_matches('/'), &d[2..]);
-            expanded
+    let cwd = if let Some(dir) = session.dir.as_ref().filter(|d| d.is_dir()) {
+        dir.to_string_lossy().to_string()
+    } else {
+        match &route.dir {
+            Some(d) if d.starts_with("~/") => {
+                let expanded = format!("{}/{}", home_dir.trim_end_matches('/'), &d[2..]);
+                expanded
+            }
+            Some(d) => d.clone(),
+            None => home_dir.to_string(),
         }
-        Some(d) => d.clone(),
-        None => home_dir.to_string(),
     };
     if std::path::Path::new(&cwd).is_dir() {
         cmd.current_dir(&cwd);
@@ -268,6 +345,7 @@ mod tests {
             cmd: cmd.into(),
             dir: None,
             timeout: None,
+            session: None,
         }
     }
 
@@ -278,16 +356,134 @@ mod tests {
             sender: "ou_self".into(),
             created_at_ms: 0,
             chat_type: "p2p".into(),
+            chat_id: "oc_test".into(),
             text: Some("/t line1\nline2\nline3".into()),
             top_level: true,
             recalled: false,
             link: Some("https://example.example/msg".into()),
         };
-        let (args, prompt) = build_inputs("/t", &msg);
-        assert_eq!(args, " line1\nline2\nline3");
-        assert!(prompt.starts_with(" line1\nline2\nline3\n\n"));
-        assert!(prompt.contains("message: om_1"));
-        assert!(prompt.contains("link: https://example.example/msg"));
+        let inputs = build_inputs("/t", &msg);
+        assert_eq!(inputs.args, " line1\nline2\nline3");
+        assert!(inputs.prompt.starts_with(" line1\nline2\nline3\n\n"));
+        assert!(inputs.source.contains("message: om_1"));
+        assert!(inputs.source.contains("chat: oc_test (p2p)"));
+        assert!(inputs.source.contains("link: https://example.example/msg"));
+        assert!(inputs.source.contains("sender: ou_self"));
+        assert_eq!(inputs.id, "om_1");
+        assert_eq!(inputs.link, "https://example.example/msg");
+    }
+
+    #[test]
+    fn default_agent_routes_start_and_continue_in_the_right_order() {
+        let dir = std::env::temp_dir().join(format!("slashie-agent-flags-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for tool in ["claude", "codex", "pi-real"] {
+            let path = dir.join(tool);
+            std::fs::write(
+                &path,
+                "#!/bin/sh\nprintf '%s|%s|' \"$0\" \"$*\"\nexec cat\n",
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let cfg = crate::config::Config::default();
+        let inputs = CommandInputs {
+            args: "".into(),
+            prompt: "hello".into(),
+            source: "message: om_1".into(),
+            id: "om_1".into(),
+            link: String::new(),
+        };
+        let path = vec![dir.to_string_lossy().to_string(), "/bin".to_string()];
+        let run = |prefix: &str, continuing: bool| {
+            let route = cfg.routes.iter().find(|r| r.prefix == prefix).unwrap();
+            let session = SessionEnv {
+                chat_id: "oc_chat".into(),
+                dir: None,
+                continuing,
+            };
+            run_command_with(
+                route,
+                &inputs,
+                &session,
+                &path,
+                "/tmp",
+                Arc::new(AtomicBool::new(false)),
+            )
+            .reply_text
+        };
+        let claude = dir.join("claude");
+        assert_eq!(
+            run("/claude", false),
+            format!("{}|-p -- hello|", claude.display())
+        );
+        assert_eq!(
+            run("/claude", true),
+            format!("{}|-p --continue -- hello|", claude.display())
+        );
+        let codex = dir.join("codex");
+        assert_eq!(
+            run("/codex", false),
+            format!("{}|exec --skip-git-repo-check -- hello|", codex.display())
+        );
+        assert_eq!(
+            run("/codex", true),
+            format!(
+                "{}|exec resume --last --skip-git-repo-check -- hello|",
+                codex.display()
+            )
+        );
+        let pi = dir.join("pi-real");
+        assert_eq!(run("/pi", false), format!("{}|-p|hello", pi.display()));
+        assert_eq!(
+            run("/pi", true),
+            format!("{}|-p --continue|hello", pi.display())
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn session_env_and_workspace_are_passed() {
+        let dir = std::env::temp_dir().join(format!("slashie-session-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = SessionEnv {
+            chat_id: "oc_chat".into(),
+            dir: Some(dir.clone()),
+            continuing: true,
+        };
+        let inputs = CommandInputs {
+            args: "a".into(),
+            prompt: "p".into(),
+            source: "message: om_1".into(),
+            id: "om_1".into(),
+            link: "https://example.example/msg".into(),
+        };
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let out = run_command_with(
+            &route(
+                "printf '%s|%s|%s|%s|%s|%s|%s' \"$SLASHIE_CONTINUE\" \"$SLASHIE_CHAT\" \"$SLASHIE_CONTEXT\" \"$SLASHIE_ID\" \"$SLASHIE_LINK\" \"$SLASHIE_SESSION_DIR\" \"$(basename \"$PWD\")\"",
+            ),
+            &inputs,
+            &session,
+            &[],
+            "/tmp",
+            shutdown,
+        );
+        assert_eq!(
+            out.reply_text,
+            format!(
+                "1|oc_chat|message: om_1|om_1|https://example.example/msg|{}|{}",
+                dir.display(),
+                dir.file_name().unwrap().to_string_lossy()
+            )
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

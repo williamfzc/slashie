@@ -29,6 +29,11 @@ pub struct Route {
     /// Optional positive integer in seconds. Defaults to 30.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
+    /// Opt into one persistent agent session per Feishu chat. The only
+    /// supported value is "chat"; the route then runs in a Slashie-owned
+    /// workspace and receives SLASHIE_CONTINUE.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -50,26 +55,35 @@ impl Default for Config {
             process_path: DEFAULT_PROCESS_PATH.iter().map(|s| s.to_string()).collect(),
             poll_interval: DEFAULT_POLL_INTERVAL,
             routes: [
-                ("/ping", "echo pong", None),
+                ("/ping", "echo pong", None, None),
                 // Pi treats positional inputs starting with `@` as attachments.
                 (
                     "/pi",
-                    r#"printf '%s' "$SLASHIE_PROMPT" | if command -v pi-real >/dev/null 2>&1; then pi-real -p; else pi -p; fi"#,
+                    r#"if command -v pi-real >/dev/null 2>&1; then tool=pi-real; else tool=pi; fi
+if [ "$SLASHIE_CONTINUE" = 1 ]; then printf '%s' "$SLASHIE_PROMPT" | "$tool" -p --continue; else printf '%s' "$SLASHIE_PROMPT" | "$tool" -p; fi"#,
                     Some(120),
+                    Some("chat"),
                 ),
-                ("/claude", r#"claude -p -- "$SLASHIE_PROMPT""#, Some(120)),
+                (
+                    "/claude",
+                    r#"if [ "$SLASHIE_CONTINUE" = 1 ]; then claude -p --continue -- "$SLASHIE_PROMPT"; else claude -p -- "$SLASHIE_PROMPT"; fi"#,
+                    Some(120),
+                    Some("chat"),
+                ),
                 (
                     "/codex",
-                    r#"codex exec --skip-git-repo-check -- "$SLASHIE_PROMPT""#,
+                    r#"if [ "$SLASHIE_CONTINUE" = 1 ]; then codex exec resume --last --skip-git-repo-check -- "$SLASHIE_PROMPT"; else codex exec --skip-git-repo-check -- "$SLASHIE_PROMPT"; fi"#,
                     Some(120),
+                    Some("chat"),
                 ),
             ]
             .into_iter()
-            .map(|(prefix, cmd, timeout)| Route {
+            .map(|(prefix, cmd, timeout, session)| Route {
                 prefix: prefix.into(),
                 cmd: cmd.into(),
                 dir: None,
                 timeout,
+                session: session.map(str::to_string),
             })
             .collect(),
         }
@@ -137,6 +151,20 @@ pub fn validate(cfg: &Config) -> Result<(), ConfigError> {
         if let Some(t) = route.timeout {
             if t == 0 {
                 return err(format!("route {:?} timeout must be a positive integer", p));
+            }
+        }
+        if let Some(session) = &route.session {
+            if session != "chat" {
+                return err(format!(
+                    "route {:?} session must be \"chat\" (got {:?})",
+                    p, session
+                ));
+            }
+            if route.dir.is_some() {
+                return err(format!(
+                    "route {:?} with session chat uses its own workspace; remove dir",
+                    p
+                ));
             }
         }
     }
@@ -268,6 +296,36 @@ mod tests {
     }
 
     #[test]
+    fn default_agent_routes_use_chat_sessions() {
+        let cfg = Config::default();
+        let by_prefix = |prefix: &str| cfg.routes.iter().find(|r| r.prefix == prefix).unwrap();
+        assert_eq!(by_prefix("/ping").session, None);
+        for prefix in ["/pi", "/claude", "/codex"] {
+            assert_eq!(
+                by_prefix(prefix).session.as_deref(),
+                Some("chat"),
+                "{prefix} keeps one session per chat"
+            );
+            assert!(by_prefix(prefix).cmd.contains("SLASHIE_CONTINUE"));
+        }
+        assert!(validate(&cfg).is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_session_mode_and_session_with_dir() {
+        let mut cfg = Config::default();
+        cfg.routes[1].session = Some("route".into());
+        assert!(validate(&cfg).is_err(), "only chat sessions exist");
+
+        let mut cfg = Config::default();
+        cfg.routes[1].dir = Some("~/work".into());
+        assert!(
+            validate(&cfg).is_err(),
+            "a chat workspace cannot also set dir"
+        );
+    }
+
+    #[test]
     fn rejects_duplicate_prefix() {
         let cfg = Config {
             routes: vec![
@@ -276,12 +334,14 @@ mod tests {
                     cmd: "echo pong".into(),
                     dir: None,
                     timeout: None,
+                    session: None,
                 },
                 Route {
                     prefix: "/ping".into(),
                     cmd: "echo again".into(),
                     dir: None,
                     timeout: None,
+                    session: None,
                 },
             ],
             ..Config::default()

@@ -28,6 +28,11 @@ struct AppState {
 }
 
 pub fn run(rt: Arc<Runtime>, shutdown: Arc<AtomicBool>) {
+    // A menu-bar app with no visible window is eligible for App Nap, which
+    // suspends the polling timers. Hold a user-initiated activity for the
+    // life of the host; idle system sleep is still allowed.
+    #[cfg(target_os = "macos")]
+    let _activity = prevent_app_nap();
     // The shared runtime runs on its own thread so menu controls take
     // effect while a subprocess is waiting.
     let rt_for_loop = rt.clone();
@@ -192,6 +197,16 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn prevent_app_nap() -> impl Sized {
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+    let reason = NSString::from_str("Slashie polls Feishu for commands");
+    NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+        NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+        &reason,
+    )
 }
 
 fn pulse_visible(status: &RuntimeStatus, polling: bool, now: Instant) -> bool {

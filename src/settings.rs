@@ -107,7 +107,8 @@ impl SettingsDraft {
                     .filter(|r| r.prefix == d.prefix)
                     .or_else(|| {
                         base.routes.iter().find(|r| {
-                            r.prefix == d.prefix && (r.dir.is_some() || r.timeout.is_some())
+                            r.prefix == d.prefix
+                                && (r.dir.is_some() || r.timeout.is_some() || r.session.is_some())
                         })
                     });
                 Route {
@@ -115,6 +116,7 @@ impl SettingsDraft {
                     cmd: d.cmd.clone(),
                     dir: preserved.and_then(|r| r.dir.clone()),
                     timeout: preserved.and_then(|r| r.timeout),
+                    session: preserved.and_then(|r| r.session.clone()),
                 }
             })
             .collect();
@@ -222,8 +224,9 @@ mod tests {
         base.routes.push(Route {
             prefix: "/go".into(),
             cmd: "echo go".into(),
-            dir: Some("/tmp/other".into()),
+            dir: None,
             timeout: Some(5),
+            session: Some("chat".into()),
         });
         let d = draft(30, &[("/ping", "echo new-ping"), ("/go", "echo new-go")]);
         let out = d.apply_to(&base).unwrap();
@@ -231,8 +234,9 @@ mod tests {
         assert_eq!(out.routes[0].cmd, "echo new-ping");
         assert_eq!(out.routes[0].dir.as_deref(), Some("~/work"));
         assert_eq!(out.routes[0].timeout, Some(45));
-        assert_eq!(out.routes[1].dir.as_deref(), Some("/tmp/other"));
+        assert_eq!(out.routes[1].dir, None);
         assert_eq!(out.routes[1].timeout, Some(5));
+        assert_eq!(out.routes[1].session.as_deref(), Some("chat"));
         // Fields the window does not edit survive.
         assert_eq!(out.process_path, base.process_path);
     }

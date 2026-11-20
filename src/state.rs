@@ -1,8 +1,9 @@
 //! Durable runtime state (DESIGN.md, "Polling and claims" and file table).
 //!
 //! `state.json` is the source of truth for the polling setting, the identity
-//! binding, the last completed scan end, and consumed (pending/settled) claims
-//! keyed by message ID. Updates are serialized by the runtime coordinator and persisted
+//! binding, the last completed scan end, consumed (pending/settled) claims
+//! keyed by message ID, and the chat-to-session mapping used by routes that
+//! opted into `session: "chat"`. Updates are serialized by the runtime coordinator and persisted
 //! atomically with a synced file and directory.
 
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,16 @@ pub struct Claim {
     pub outcome: Option<String>,
 }
 
+/// One chat route that already has a local agent session. The workspace is
+/// derived from `chat_id`; this record only decides whether the next command
+/// may resume the session (`SLASHIE_CONTINUE=1`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatSession {
+    pub chat_id: String,
+    pub prefix: String,
+    pub last_success_ms: i64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct State {
     /// Saved polling setting; shared by menu, headless `--poll`, and restarts.
@@ -42,6 +53,8 @@ pub struct State {
     pub last_scan_end_ms: i64,
     #[serde(default)]
     pub claims: Vec<Claim>,
+    #[serde(default)]
+    pub chat_sessions: Vec<ChatSession>,
 }
 
 fn default_paused() -> bool {
@@ -88,6 +101,22 @@ pub fn load_or_init(home: &Path) -> Result<StateLoad, StateError> {
                     return Err(StateError(format!("duplicate claim for {}", c.message_id)));
                 }
                 seen.push(&c.message_id);
+            }
+            let mut seen_sessions: Vec<(&str, &str)> = Vec::new();
+            for session in &st.chat_sessions {
+                if session.last_success_ms < 0 {
+                    return Err(StateError(
+                        "chat session last_success_ms must be nonnegative".into(),
+                    ));
+                }
+                let key = (session.chat_id.as_str(), session.prefix.as_str());
+                if seen_sessions.contains(&key) {
+                    return Err(StateError(format!(
+                        "duplicate chat session for {} {}",
+                        session.chat_id, session.prefix
+                    )));
+                }
+                seen_sessions.push(key);
             }
             Ok(StateLoad::Loaded(st))
         }
@@ -155,6 +184,34 @@ impl State {
             self.last_scan_end_ms = now_ms;
         }
     }
+
+    /// True when this chat route has completed a command successfully and may
+    /// resume its agent session.
+    pub fn has_chat_session(&self, chat_id: &str, prefix: &str) -> bool {
+        self.chat_sessions
+            .iter()
+            .any(|s| s.chat_id == chat_id && s.prefix == prefix)
+    }
+
+    /// Remember that the chat route now has a session. The timestamp only
+    /// moves forward.
+    pub fn record_chat_session(&mut self, chat_id: &str, prefix: &str, now_ms: i64) {
+        if let Some(session) = self
+            .chat_sessions
+            .iter_mut()
+            .find(|s| s.chat_id == chat_id && s.prefix == prefix)
+        {
+            if now_ms > session.last_success_ms {
+                session.last_success_ms = now_ms;
+            }
+        } else {
+            self.chat_sessions.push(ChatSession {
+                chat_id: chat_id.to_string(),
+                prefix: prefix.to_string(),
+                last_success_ms: now_ms,
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -189,6 +246,30 @@ mod tests {
         let saved = serde_json::to_string(&st).unwrap();
         assert!(saved.contains("last_scan_end_ms"));
         assert!(!saved.contains("pruning_cutoff_ms"));
+    }
+
+    #[test]
+    fn chat_session_mapping_roundtrip() {
+        let mut st = State::default();
+        assert!(!st.has_chat_session("oc_a", "/claude"));
+        st.record_chat_session("oc_a", "/claude", 100);
+        st.record_chat_session("oc_a", "/claude", 50); // never decreases
+        st.record_chat_session("oc_a", "/codex", 200);
+        assert!(st.has_chat_session("oc_a", "/claude"));
+        assert!(st.has_chat_session("oc_a", "/codex"));
+        assert!(!st.has_chat_session("oc_b", "/claude"));
+        assert_eq!(st.chat_sessions.len(), 2);
+        assert_eq!(
+            st.chat_sessions
+                .iter()
+                .find(|s| s.prefix == "/claude")
+                .unwrap()
+                .last_success_ms,
+            100
+        );
+        let text = serde_json::to_string(&st).unwrap();
+        let back: State = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.chat_sessions, st.chat_sessions);
     }
 
     #[test]

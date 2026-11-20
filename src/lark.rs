@@ -418,11 +418,17 @@ fn parse_item(item: &Value) -> Result<Message, String> {
         .and_then(|v| v.as_str())
         .unwrap_or("group")
         .to_string();
+    let chat_id = item
+        .get("chat_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     Ok(Message {
         id,
         sender,
         created_at_ms: create_time,
         chat_type,
+        chat_id,
         text,
         top_level: root.is_empty() && parent.is_empty(),
         recalled: item
@@ -763,6 +769,7 @@ if args[:3] == ["api", "GET", "/open-apis/im/v1/messages/mget"]:
         item = {"message_id": mid, "msg_type": "text",
                 "create_time": "1795096700000",
                 "chat_type": "p2p",
+                "chat_id": "oc_chat",
                 "sender": {"id": "ou_verified", "id_type": "open_id", "sender_type": "user"},
                 "body": {"content": json.dumps({"text": "/ping"})}}
         if mid == "om_recalled":
@@ -941,6 +948,7 @@ sys.exit(0)
         assert_eq!(by_id["om_img"].text, None, "non-text message");
         assert_eq!(by_id["om_bot"].sender, "ou_bot");
         assert_eq!(by_id["om_ok"].created_at_ms, 1_795_096_700_000);
+        assert_eq!(by_id["om_ok"].chat_id, "oc_chat");
 
         assert!(matches!(
             t.mget(&["om_missing".to_string()]),

@@ -14,6 +14,9 @@ pub struct Message {
     pub created_at_ms: i64,
     /// "p2p" or "group" (mock-shaped; the real adapter decodes placement).
     pub chat_type: String,
+    /// Feishu chat ID (`oc_...`). Fixtures may omit it.
+    #[serde(default)]
+    pub chat_id: String,
     /// Decoded text body for text messages; None for non-text messages.
     pub text: Option<String>,
     /// Validated placement: true when the message is top-level (no root/parent).
@@ -237,6 +240,7 @@ mod tests {
             sender: "ou_self".into(),
             created_at_ms: ts,
             chat_type: "p2p".into(),
+            chat_id: "oc_test".into(),
             text: Some("/ping".into()),
             top_level: true,
             recalled: false,
