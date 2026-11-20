@@ -177,12 +177,14 @@ fn main() {
     let guard = match lock::acquire(&home) {
         lock::LockResult::Acquired(g) => g,
         lock::LockResult::Conflict => {
-            let msg = if menu_bar_mode {
-                "Slashie is already running."
+            if menu_bar_mode {
+                alert_and_exit("Slashie is already running.");
             } else {
-                "Slashie is already running; stop it first or use its menu                  to change polling. (lock held at the configured home)"
-            };
-            alert_and_exit(msg)
+                fail(
+                    "Slashie is already running; stop it first or use its \
+                      menu to change polling.",
+                );
+            }
         }
         lock::LockResult::Failed(m) => fail(&m),
     };
@@ -202,6 +204,16 @@ fn main() {
     let (config, config_fault) = config::Config::load_or_create(&home)
         .unwrap_or_else(|e| fail(&format!("cannot read config.json: {}", e)));
 
+    // `--poll on|off` is a control invocation before any transport exists:
+    // it updates the persisted polling setting under the lock and exits,
+    // with or without `--mock` (which would otherwise settle pending
+    // claims as interrupted — a side effect the flag must not have).
+    if let Some(on) = poll {
+        let ok = runtime::apply_poll_control(&home, on).unwrap_or_else(|e| fail(&e));
+        println!("polling set to {}", if ok { "on" } else { "off" });
+        return;
+    }
+
     // Startup faults must not kill the menu bar before it exists: in
     // menu-bar mode a fault yields a placeholder channel, an unbound
     // identity, and the matching operator-action row (menu-bar.md "Status
@@ -210,8 +222,8 @@ fn main() {
         Ready(Arc<dyn transport::Channel>, String),
         Unconfigured(String, status::OperatorFault),
     }
-    let startup: Startup = match (&mock_path, poll) {
-        (Some(path), _) => {
+    let startup: Startup = match &mock_path {
+        Some(path) => {
             let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
                 fail(&format!(
                     "cannot read mock fixture {}: {}",
@@ -224,14 +236,7 @@ fn main() {
             let id = mock.self_open_id().to_string();
             Startup::Ready(mock as Arc<dyn transport::Channel>, id)
         }
-        // Control invocation: no transport is needed to update the
-        // persisted polling setting under the lock.
-        (None, Some(on)) => {
-            let ok = runtime::apply_poll_control(&home, on).unwrap_or_else(|e| fail(&e));
-            println!("polling set to {}", if ok { "on" } else { "off" });
-            return;
-        }
-        (None, None) => {
+        None => {
             let die_or_wait = |msg: String, action: status::OperatorFault| -> Startup {
                 if menu_bar_mode {
                     Startup::Unconfigured(msg, action)
@@ -318,19 +323,19 @@ fn main() {
     if rt.fresh_install {
         logger.log("first run: state created; polling starts paused");
     }
-
-    if poll.is_some() {
-        // `--poll on|off` (with `--mock`) is a control run: report a blocked
-        // intake honestly and exit nonzero; otherwise the persisted setting
-        // was applied under the lock and we are done.
-        if let Some(reason) = rt.intake_blocked.lock().unwrap().clone() {
+    // Surface any other blocked intake exactly once; startup faults were
+    // already logged above and must not appear twice.
+    if let Some(reason) = rt.intake_blocked.lock().unwrap().clone() {
+        let already_logged = startup_fault
+            .as_ref()
+            .is_some_and(|(msg, _)| *msg == reason);
+        if !already_logged {
+            logger.log(&format!("ERROR intake blocked: {}", reason));
             eprintln!(
                 "slashie: intake blocked: {} (operator action required)",
                 reason
             );
-            std::process::exit(3);
         }
-        return;
     }
 
     logger.log(if menu_bar_mode {

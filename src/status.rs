@@ -31,6 +31,9 @@ pub enum OperatorFault {
     SignInToFeishu,
     LocalStateUnavailable,
     CouldNotSavePollingSetting,
+    /// A config.json edit was rejected as invalid; the last valid
+    /// configuration stays in force until the file is fixed.
+    ConfigRejected,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,6 +65,9 @@ pub fn status_line(s: &RuntimeStatus) -> Option<&'static str> {
         Some(OperatorFault::LocalStateUnavailable) => return Some("Local state unavailable"),
         Some(OperatorFault::CouldNotSavePollingSetting) => {
             return Some("Could not save polling setting")
+        }
+        Some(OperatorFault::ConfigRejected) => {
+            return Some("Config rejected · using last valid settings")
         }
         None => {}
     }

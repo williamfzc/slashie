@@ -303,12 +303,20 @@ impl Runtime {
             Ok(config) => {
                 *self.config.lock().unwrap() = config;
                 self.logger.log("configuration reloaded from config.json");
+                let mut status = self.status.lock().unwrap();
+                if status.operator_action == Some(crate::status::OperatorFault::ConfigRejected) {
+                    status.operator_action = None;
+                }
             }
             Err(e) => {
                 self.logger.log(&format!(
                     "ERROR config.json is invalid: {} (keeping previous configuration)",
                     e
                 ));
+                let mut status = self.status.lock().unwrap();
+                if status.operator_action.is_none() {
+                    status.operator_action = Some(crate::status::OperatorFault::ConfigRejected);
+                }
             }
         }
     }
@@ -424,12 +432,15 @@ impl Runtime {
 
         let eligible_count = eligible.len();
         let mut jobs = Vec::new();
-        // Claims this scan has already made per conversation; mailbox
-        // occupancy only moves at delivery, so admission counts them too.
+        // Claims this scan has already made per conversation, and new
+        // mailboxes it has promised: mailbox occupancy only moves at
+        // delivery, so admission counts its own in-flight claims against
+        // both caps.
         let mut claimed_per_key: std::collections::HashMap<
             crate::transport::ConversationKey,
             usize,
         > = std::collections::HashMap::new();
+        let mut promised_new = 0usize;
         for m in eligible {
             let route = {
                 let first = m.text.as_ref().unwrap().split_whitespace().next().unwrap();
@@ -443,7 +454,7 @@ impl Runtime {
             // the job; the mailbox it names must have room before claiming.
             let key = self.transport.conversation_key(&m);
             let extra = claimed_per_key.get(&key).copied().unwrap_or(0);
-            match self.mailboxes.room(&key, extra) {
+            match self.mailboxes.room(&key, extra, promised_new) {
                 crate::mailbox::Room::Available => {}
                 crate::mailbox::Room::MailboxFull => {
                     self.logger.log(&format!(
@@ -487,6 +498,9 @@ impl Runtime {
             }
             self.logger
                 .log(&format!("claimed {} for route {}", m.id, route.prefix));
+            if extra == 0 && !self.mailboxes.is_tracked(&key) {
+                promised_new += 1;
+            }
             *claimed_per_key.entry(key.clone()).or_insert(0) += 1;
             jobs.push(Job {
                 key,
@@ -1779,6 +1793,78 @@ mod tests {
             "delivered claims stay pending, unclaimed candidates stay unclaimed"
         );
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn conversation_slots_cap_claims_without_stranding_them() {
+        let now = now_ms();
+        let boundary = now - 60_000;
+        let msgs: Vec<_> = (0..20)
+            .map(|n| {
+                mkmsg(
+                    &format!("om_c{n}"),
+                    boundary + 1_000 + n,
+                    "ou_self",
+                    Some("/ping"),
+                    true,
+                    false,
+                )
+            })
+            .collect();
+        // Give every message its own conversation, like 20 different chats.
+        let mut fixture = fixture_with(msgs);
+        for n in 0..20 {
+            fixture.messages[n].chat_id = format!("oc_conv{n}");
+        }
+        let (rt, mock, home) = init_rt("convslots", fixture, boundary);
+        // Pre-fill 12 live mailboxes with blocked workers, so the
+        // conversation cap binds before the global claims cap.
+        rt.mailboxes.set_runner(Arc::new(|_job: Job| {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }));
+        let prefill: Vec<_> = (0..12)
+            .map(|n| {
+                let mut m = mkmsg(
+                    &format!("om_pre{n}"),
+                    boundary + 100,
+                    "ou_self",
+                    Some("/ping"),
+                    true,
+                    false,
+                );
+                m.chat_id = format!("oc_prefill{n}");
+                Job {
+                    key: crate::transport::ConversationKey {
+                        channel: "feishu".into(),
+                        chat_id: m.chat_id.clone(),
+                        topic_id: None,
+                    },
+                    message: m,
+                    route: rt.config.lock().unwrap().routes[0].clone(),
+                }
+            })
+            .collect();
+        rt.mailboxes.deliver(prefill);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let jobs = rt.scan_once().unwrap();
+        assert_eq!(
+            jobs.len(),
+            crate::mailbox::MAX_ACTIVE_CONVERSATIONS - 12,
+            "the conversation cap binds: only the free slots are claimed"
+        );
+        rt.mailboxes.deliver(jobs);
+        let st = match load_or_init(&home).unwrap() {
+            StateLoad::Loaded(s) => s,
+            _ => panic!(),
+        };
+        assert_eq!(
+            st.claims.len(),
+            crate::mailbox::MAX_ACTIVE_CONVERSATIONS - 12,
+            "claimed work is never stranded beyond any cap"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = mock;
     }
 
     #[test]

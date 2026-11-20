@@ -19,6 +19,12 @@ use std::path::Path;
 pub struct DraftRoute {
     pub prefix: String,
     pub cmd: String,
+    /// Client-side row identity: true for rows the Settings window added
+    /// during this editing session. Such rows are new routes and never
+    /// inherit a dead row's dir/timeout/session. The file itself never
+    /// stores this; serde defaults it for any producer that omits it.
+    #[serde(default)]
+    pub is_new: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -38,6 +44,7 @@ impl SettingsDraft {
                 .map(|r| DraftRoute {
                     prefix: r.prefix.clone(),
                     cmd: r.cmd.clone(),
+                    is_new: false,
                 })
                 .collect(),
         }
@@ -100,18 +107,19 @@ impl SettingsDraft {
             .iter()
             .enumerate()
             .map(|(i, d)| {
-                // Preserve dir/timeout: same position first (unchanged list),
-                // then same prefix (edited rows keep their options).
-                let preserved = base
-                    .routes
-                    .get(i)
-                    .filter(|r| r.prefix == d.prefix)
-                    .or_else(|| {
-                        base.routes.iter().find(|r| {
-                            r.prefix == d.prefix
-                                && (r.dir.is_some() || r.timeout.is_some() || r.session.is_some())
-                        })
-                    });
+                // Preserve dir/timeout/session only for rows the window
+                // loaded: same position (an edited row, renamed prefix
+                // included) or the same prefix elsewhere. A row the window
+                // added is a new route and never inherits a dead row's
+                // options just because it reuses its prefix.
+                let preserved = if d.is_new {
+                    None
+                } else {
+                    base.routes
+                        .get(i)
+                        .filter(|r| r.prefix == d.prefix)
+                        .or_else(|| base.routes.iter().find(|r| r.prefix == d.prefix))
+                };
                 Route {
                     prefix: d.prefix.clone(),
                     cmd: d.cmd.clone(),
@@ -186,6 +194,7 @@ mod tests {
                 .map(|(p, c)| DraftRoute {
                     prefix: p.to_string(),
                     cmd: c.to_string(),
+                    is_new: false,
                 })
                 .collect(),
         }

@@ -243,13 +243,13 @@ pub fn run_command_with(
     let t1 = std::thread::spawn(move || {
         let mut chunk = [0u8; 4096];
         loop {
-            if stdout_buf.len() >= MAX_CAPTURE_BYTES {
-                break;
-            }
             match stdout_pipe.read(&mut chunk) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    let take = n.min(MAX_CAPTURE_BYTES - stdout_buf.len());
+                    // Drain to EOF even past the capture cap: closing the
+                    // pipe early would kill a productive child with SIGPIPE
+                    // and turn a successful command into "Command failed."
+                    let take = n.min(MAX_CAPTURE_BYTES.saturating_sub(stdout_buf.len()));
                     stdout_buf.extend_from_slice(&chunk[..take]);
                 }
             }
@@ -259,13 +259,11 @@ pub fn run_command_with(
     let t2 = std::thread::spawn(move || {
         let mut chunk = [0u8; 4096];
         loop {
-            if stderr_buf.len() >= MAX_CAPTURE_BYTES {
-                break;
-            }
             match stderr_pipe.read(&mut chunk) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    let take = n.min(MAX_CAPTURE_BYTES - stderr_buf.len());
+                    // Same drain-past-the-cap contract as stdout.
+                    let take = n.min(MAX_CAPTURE_BYTES.saturating_sub(stderr_buf.len()));
                     stderr_buf.extend_from_slice(&chunk[..take]);
                 }
             }

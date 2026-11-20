@@ -23,7 +23,7 @@ Enabling polling covers supported conversations visible to the authorized accoun
 
 ## Controls and faults
 
-Use the [macOS menu](menu-bar.md) to toggle polling, open Settings, and quit. Settings edits the polling interval and route commands. Saved edits apply at the next scan without a restart, and the diagnostic log is available from Settings. Headless mode runs the same service in the foreground and logs status. Feishu carries command outcomes. The menu and the local log carry operational faults, including when a reply failed or its delivery is uncertain.
+Use the [macOS menu](menu-bar.md) to toggle polling, open Settings, and quit. Quitting while commands run or wait replies `Canceled: Slashie is shutting down.` for each affected command; queued-but-never-started work is likewise canceled, not silently dropped. Settings edits the polling interval and route commands. Saved edits apply at the next scan without a restart, and the diagnostic log is available from Settings. Headless mode runs the same service in the foreground and logs status. Feishu carries command outcomes. The menu and the local log carry operational faults, including when a reply failed or its delivery is uncertain.
 
 ## Pause and recovery
 
@@ -55,6 +55,8 @@ The `/pi` context reader was part of the test harness. The shipped route interfa
 | Send two commands in each of two topics in one chat, then a follow-up in the first topic. Send a command in an ordinary reply thread without a topic. | Each topic has its own session and workspace. The follow-up resumes the first topic. The ordinary reply is ignored. Replies appear in their topic. A message whose text starts with a command but is Slashie's own delivered reply never executes. |
 | Exercise both route input forms with multiline text and shell metacharacters. Send a near-prefix, another author's message, and a reply beginning with a command. | The selected input form arrives as one argument. Source context is included when requested. Message text cannot change the shell program, and ineligible messages never execute. |
 | Deliver duplicate and late-indexed results. Kill the process after a claim and during a reply attempt. | Eligible results inside the window run once. Claims survive restart and uncertain attempts appear in the log. Corrupt state blocks new work. |
+| Send more commands than the queues hold: a burst in one conversation, and messages from more conversations than slots. | Each scan admits at most the caps ([design](DESIGN.md#polling-and-claims)); the overflow stays unclaimed and later scans admit it. Nothing claimed is ever left unrun. |
+| Quit while a command runs and while others wait in its conversation. | Every affected message receives `Canceled: Slashie is shutting down.`; none report an ordinary command failure. |
 | Pause during a command, send messages while paused, resume, and restart. | Accepted work can finish during pause. Earlier messages remain outside every new activation window. |
 | Submit work while a command runs, then time out a command that has ordinary child processes. | Execution stays serial, polling proceeds while queue space remains, and the timed-out process group exits. |
 | Exercise empty stdout, long output, invalid configuration, expired credentials, and an ambiguous reply. | Replies and local fault states follow the contracts above. The reply marks truncated output. Ambiguous delivery does not trigger a resend. |

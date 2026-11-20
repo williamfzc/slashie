@@ -259,8 +259,9 @@
     let nextRouteId = 0;
     let cliPath = "";
 
-    function routeRow(prefix, cmd) {
+    function routeRow(prefix, cmd, isNew = false) {
       const row = routes.insertRow();
+      row.dataset.isNew = isNew ? "1" : "0";
       const routeId = ++nextRouteId;
       const prefixInput = document.createElement("input");
       prefixInput.value = prefix;
@@ -313,6 +314,7 @@
         routes: [...routes.rows].map((row) => ({
           prefix: row.querySelector("input").value,
           cmd: row.querySelector("textarea").value,
+          isNew: row.dataset.isNew === "1",
         })),
       };
     }
@@ -439,7 +441,7 @@
     }
 
     addRoute.onclick = () => {
-      const prefixInput = routeRow("", "");
+      const prefixInput = routeRow("", "", true);
       labelRoutes();
       edited();
       prefixInput.focus();

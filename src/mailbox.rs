@@ -86,10 +86,11 @@ impl Mailboxes {
 
     /// Whether a candidate for `key` can be claimed right now. `extra`
     /// counts candidates already claimed for this key earlier in the same
-    /// scan: mailbox occupancy only moves at delivery and completion, so
-    /// the scan must account for its own in-flight claims to keep the cap
-    /// exact.
-    pub fn room(&self, key: &ConversationKey, extra: usize) -> Room {
+    /// scan, and `promised_new` counts new mailboxes earlier claims in this
+    /// scan have already promised: mailbox occupancy only moves at delivery
+    /// and completion, so the scan must account for its own in-flight
+    /// claims to keep both caps exact.
+    pub fn room(&self, key: &ConversationKey, extra: usize, promised_new: usize) -> Room {
         let registry = self.registry.lock().unwrap();
         match registry.map.get(key) {
             Some(mailbox) => {
@@ -102,7 +103,8 @@ impl Mailboxes {
             None => {
                 if extra >= MAX_WAITING_PER_CONVERSATION {
                     Room::MailboxFull
-                } else if extra > 0 || registry.map.len() < MAX_ACTIVE_CONVERSATIONS {
+                } else if extra > 0 || registry.map.len() + promised_new < MAX_ACTIVE_CONVERSATIONS
+                {
                     // An extra > 0 means an earlier claim in this scan
                     // already promised this conversation a mailbox.
                     Room::Available
@@ -111,6 +113,11 @@ impl Mailboxes {
                 }
             }
         }
+    }
+
+    /// Whether a worker currently serves this conversation.
+    pub fn is_tracked(&self, key: &ConversationKey) -> bool {
+        self.registry.lock().unwrap().map.contains_key(key)
     }
 
     /// Enqueue jobs into their conversation mailboxes in the given order,
@@ -134,8 +141,8 @@ impl Mailboxes {
                     Destination::Reuse(mailbox.tx.clone())
                 }
                 // Backstop only: with room() checked against in-scan claim
-                // counts, an admitted batch always fits. A skip here would
-                // leave its claim pending until restart recovery.
+                // and mailbox counts, an admitted batch always fits. A skip
+                // here strands its claim until restart recovery.
                 Some(_) => Destination::Skip,
                 None => Destination::Create,
             };
@@ -149,8 +156,9 @@ impl Mailboxes {
                 }
                 Destination::Create => {
                     if registry.map.len() >= MAX_ACTIVE_CONVERSATIONS {
-                        // The registry filled while this scan claimed; leave
-                        // the candidate for a later scan.
+                        // Unreachable with in-scan accounting: room() counted
+                        // this scan's promised mailboxes. Kept as a backstop;
+                        // a skip here strands its claim until restart.
                         continue;
                     }
                     registry.next_id += 1;
@@ -412,8 +420,8 @@ mod tests {
             jobs.push(job("chat_c", &format!("c{n}")));
         }
         boxes.deliver(jobs);
-        assert_eq!(boxes.room(&key("chat_c"), 0), Room::MailboxFull);
-        assert_eq!(boxes.room(&key("other"), 0), Room::Available);
+        assert_eq!(boxes.room(&key("chat_c"), 0, 0), Room::MailboxFull);
+        assert_eq!(boxes.room(&key("other"), 0, 0), Room::Available);
 
         // Exhaust every conversation slot.
         let mut more = Vec::new();
@@ -421,13 +429,13 @@ mod tests {
             more.push(job(&format!("fill_{n}"), &format!("f{n}")));
         }
         boxes.deliver(more);
-        assert_eq!(boxes.room(&key("overflow"), 0), Room::MailboxesExhausted);
+        assert_eq!(boxes.room(&key("overflow"), 0, 0), Room::MailboxesExhausted);
 
         // Release the gate; workers drain and the room returns.
         *gate.lock().unwrap() = true;
         signal.notify_all();
         boxes.drain_and_join();
-        assert_eq!(boxes.room(&key("overflow"), 0), Room::Available);
+        assert_eq!(boxes.room(&key("overflow"), 0, 0), Room::Available);
     }
 
     #[test]
