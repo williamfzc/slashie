@@ -376,25 +376,41 @@ mod tests {
             ["om_b0", "om_b1", "om_b2"],
             "per-conversation FIFO"
         );
-        // Interleaving is scheduling-dependent; assert parallelism instead:
-        // total wall time for 6 x 20 ms jobs must be far below serial 120 ms
-        // if conversations actually ran concurrently. drain_and_join already
-        // waited; re-measuring here would be flaky, so assert ordering only
-        // and rely on the concurrency test below for timing.
+        // Interleaving is scheduling-dependent; assert ordering here and rely
+        // on the gated concurrency test below to prove simultaneous progress.
     }
 
     #[test]
     fn conversations_progress_in_parallel() {
         let boxes = Mailboxes::new(Arc::new(AtomicBool::new(false)));
-        let log = Arc::new(Mutex::new(Vec::new()));
-        boxes.set_runner(logging_runner(log, Some(Duration::from_millis(60))));
-        let started = std::time::Instant::now();
+        // Prove both runners entered before either may complete. Wall-clock
+        // speed depends on CI load and cannot establish concurrency reliably.
+        let gate = Arc::new((Mutex::new((0usize, false)), std::sync::Condvar::new()));
+        let runner_gate = Arc::clone(&gate);
+        boxes.set_runner(Arc::new(move |_job: Job| {
+            let (lock, signal) = &*runner_gate;
+            let mut state = lock.lock().unwrap();
+            state.0 += 1;
+            signal.notify_all();
+            while !state.1 {
+                state = signal.wait(state).unwrap();
+            }
+        }));
         boxes.deliver(vec![job("c1", "x"), job("c2", "y")]);
+        let (lock, signal) = &*gate;
+        let (mut state, _) = signal
+            .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(5), |state| {
+                state.0 < 2
+            })
+            .unwrap();
+        let concurrent = state.0;
+        state.1 = true;
+        signal.notify_all();
+        drop(state);
         boxes.drain_and_join();
-        assert!(
-            started.elapsed() < Duration::from_millis(110),
-            "two 60 ms jobs in different conversations must overlap; took {:?}",
-            started.elapsed()
+        assert_eq!(
+            concurrent, 2,
+            "both conversations must enter before either finishes"
         );
     }
 
