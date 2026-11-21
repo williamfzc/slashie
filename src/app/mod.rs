@@ -21,9 +21,9 @@ use tauri::{
 /// empty one (menu-bar.md "Status item and menu").
 const SCAN_FLASH_DURATION: Duration = Duration::from_millis(1500);
 
-/// Sampling cadence of the tray thread; the classifier pairs consecutive
-/// samples so the dot breathes about once a second, quicker in a scan.
-const SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
+/// Sampling cadence of the tray thread; eight levels at this rate give the
+/// glyph a one-second breath cycle, twice as fast during a scan.
+const SAMPLE_INTERVAL: Duration = Duration::from_millis(125);
 
 /// The menu-bar icon frames (menu-bar.md "Status item and menu").
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -33,15 +33,16 @@ enum Frame {
     Dimmed,
     /// The status line speaks (startup, faults, retries): the plain glyph.
     Plain,
-    /// Polling on: the dot beside the slashes breathing — quick while a
-    /// scan is in flight, calm between scans, steady-bright briefly after
-    /// a complete scan. The dot never disappears while the switch is on.
-    Dot { bright: bool },
+    /// Polling on: the whole glyph breathing, one level per sample of the
+    /// sine table — quicker while a scan is in flight, full brightness
+    /// held briefly after a complete scan.
+    Breath { level: usize },
 }
 
-/// The breathing dot sits in the clear corner beside the slash tails
-/// (verified against the 32x32 template's alpha grid).
-const DOT_POS: (isize, isize) = (24, 24);
+/// Whole-glyph breathing: eight sine-sampled alpha levels from 35% to
+/// full, one level per sample (125 ms) — a one-second breath cycle.
+const BREATH_LEVELS: usize = 8;
+const BREATH_MIN: u32 = 35;
 
 /// Classify the icon frame for the current runtime state. `tick` counts
 /// loop iterations and advances the spinner while a scan is in flight.
@@ -53,21 +54,23 @@ fn tray_frame(status: &RuntimeStatus, polling: bool, now: Instant, tick: u64) ->
         return Frame::Plain;
     }
     if status.scanning {
-        // Quick breath: the scan is felt.
-        return Frame::Dot {
-            bright: tick.is_multiple_of(2),
+        // Quicker breath: the scan is felt.
+        return Frame::Breath {
+            level: (tick % (BREATH_LEVELS as u64 / 2)) as usize,
         };
     }
-    // A completed scan holds the dot bright briefly, then the calm breath
+    // A completed scan holds full brightness briefly, then the calm breath
     // resumes — the switch is on and the poller is alive.
     if status
         .last_successful_scan
         .is_some_and(|scan| now.duration_since(scan) < SCAN_FLASH_DURATION)
     {
-        return Frame::Dot { bright: true };
+        return Frame::Breath {
+            level: BREATH_LEVELS / 2,
+        };
     }
-    Frame::Dot {
-        bright: (tick / 2).is_multiple_of(2),
+    Frame::Breath {
+        level: (tick % BREATH_LEVELS as u64) as usize,
     }
 }
 
@@ -184,7 +187,7 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
     let icon = Image::from_bytes(include_bytes!("assets/tray-template.png"))?;
     let dimmed_icon = dim_icon(&icon, 40);
-    let (dot_bright, dot_dim) = dot_icons(&icon);
+    let breath = breath_icons(&icon);
     // Classify before building so a paused launch never shows the
     // full-brightness glyph for one sampling interval.
     let initial_frame = {
@@ -194,13 +197,7 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let initial_icon = match initial_frame {
         Frame::Dimmed => &dimmed_icon,
         Frame::Plain => &icon,
-        Frame::Dot { bright } => {
-            if bright {
-                &dot_bright
-            } else {
-                &dot_dim
-            }
-        }
+        Frame::Breath { level } => &breath[level],
     };
     let tray = TrayIconBuilder::with_id("slashie-tray")
         .icon(initial_icon.clone())
@@ -264,13 +261,7 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 let next_icon = match frame {
                     Frame::Dimmed => &dimmed_icon,
                     Frame::Plain => &icon,
-                    Frame::Dot { bright } => {
-                        if bright {
-                            &dot_bright
-                        } else {
-                            &dot_dim
-                        }
-                    }
+                    Frame::Breath { level } => &breath[level],
                 };
                 if tray
                     .set_icon_with_as_template(Some(next_icon.clone()), true)
@@ -332,52 +323,18 @@ fn prevent_app_nap() -> impl Sized {
     )
 }
 
-fn dot_alphas(bright: bool) -> [[u8; 4]; 4] {
-    if bright {
-        [
-            [32, 176, 176, 32],
-            [176, 255, 255, 176],
-            [176, 255, 255, 176],
-            [32, 176, 176, 32],
-        ]
-    } else {
-        [
-            [12, 72, 72, 12],
-            [72, 104, 104, 72],
-            [72, 104, 104, 72],
-            [12, 72, 72, 12],
-        ]
-    }
-}
-
-/// Stamp a 4x4 dot with its top-left corner at (ox, oy), clamped to the
-/// icon. The dot's alpha takes the maximum with what is underneath, so the
-/// orbit passing over the glyph merges with it instead of erasing it.
-fn dot_icon_at(base: &Image<'_>, ox: isize, oy: isize, alphas: [[u8; 4]; 4]) -> Image<'static> {
-    let mut rgba = base.rgba().to_vec();
-    let width = base.width() as isize;
-    for (y, row) in alphas.iter().enumerate() {
-        for (x, opacity) in row.iter().enumerate() {
-            let px = ox + x as isize;
-            let py = oy + y as isize;
-            if px < 0 || py < 0 || px >= width || py >= width {
-                continue;
-            }
-            let pixel = ((py * width + px) * 4) as usize;
-            let under = rgba[pixel + 3];
-            rgba[pixel + 3] = under.max(*opacity);
-        }
-    }
-    Image::new_owned(rgba, base.width(), base.height())
-}
-
-/// The breathing dot in its two extremes.
-fn dot_icons(base: &Image<'_>) -> (Image<'static>, Image<'static>) {
-    let (ox, oy) = DOT_POS;
-    (
-        dot_icon_at(base, ox, oy, dot_alphas(true)),
-        dot_icon_at(base, ox, oy, dot_alphas(false)),
-    )
+/// One pre-rendered glyph per breath level: the whole `//` alpha scaled
+/// along a sine from BREATH_MIN to full brightness.
+fn breath_icons(base: &Image<'_>) -> Vec<Image<'static>> {
+    (0..BREATH_LEVELS)
+        .map(|i| {
+            let phase = i as f64 / BREATH_LEVELS as f64;
+            let level = BREATH_MIN
+                + ((100 - BREATH_MIN) as f64 * (0.5 - 0.5 * (phase * std::f64::consts::TAU).cos()))
+                    .round() as u32;
+            dim_icon(base, level)
+        })
+        .collect()
 }
 
 /// Template icons carry their shape in alpha; dimming it signals paused.
@@ -527,21 +484,36 @@ struct SettingsPayload {
     config_text: String,
     config_unparsable: bool,
     log_available: bool,
+    /// The Feishu identity verified at startup, when one was.
+    identity: String,
+    /// One word for how the identity binding stands.
+    identity_status: &'static str,
 }
 
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> SettingsPayload {
-    SettingsPayload::load(&state.rt.home)
+    let identity = state.rt.identity.clone();
+    let blocked = state.rt.is_intake_blocked();
+    SettingsPayload::load(&state.rt.home, &identity, blocked)
 }
 
 impl SettingsPayload {
-    fn load(home: &std::path::Path) -> Self {
+    fn load(home: &std::path::Path, identity: &str, blocked: bool) -> Self {
         let path = home.join("config.json");
         let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let identity_status = if identity.is_empty() {
+            "not verified"
+        } else if blocked {
+            "unavailable"
+        } else {
+            "connected"
+        };
         Self {
             config_unparsable: Config::parse(&text).is_err(),
             config_text: text,
             log_available: home.join("slashie.log").exists(),
+            identity: identity.to_string(),
+            identity_status,
         }
     }
 }
@@ -594,8 +566,8 @@ struct StatusPayload {
     status_text: Option<&'static str>,
     /// A scan is in flight right now.
     scanning: bool,
-    /// Whole seconds since the last complete scan, when one exists.
-    last_scan_age_secs: Option<u64>,
+    /// Whole seconds until the run loop's next scan, when scheduled.
+    next_scan_in_secs: Option<u64>,
     poll_interval_secs: u64,
 }
 
@@ -607,13 +579,18 @@ fn get_status(state: State<'_, AppState>) -> StatusPayload {
         let st = state.rt.state.lock().unwrap();
         st.polling
     };
+    let next_scan_in_secs = state
+        .rt
+        .next_scan_at
+        .lock()
+        .unwrap()
+        .and_then(|wake| wake.checked_duration_since(Instant::now()))
+        .map(|d| d.as_secs());
     StatusPayload {
         polling,
         status_text: status_line(&status),
         scanning: status.scanning,
-        last_scan_age_secs: status
-            .last_successful_scan
-            .map(|scan| scan.elapsed().as_secs()),
+        next_scan_in_secs,
         poll_interval_secs: state.rt.config.lock().unwrap().poll_interval,
     }
 }
@@ -634,50 +611,52 @@ mod tests {
             );
         }
 
-        // Polling on: the dot breathes, one second per cycle.
+        // Polling on: the whole glyph breathes on a one-second cycle.
         let mut status = RuntimeStatus::default();
         assert_eq!(
             tray_frame(&status, true, now, 0),
-            Frame::Dot { bright: true }
-        );
-        assert_eq!(
-            tray_frame(&status, true, now, 2),
-            Frame::Dot { bright: false }
+            Frame::Breath { level: 0 }
         );
         assert_eq!(
             tray_frame(&status, true, now, 4),
-            Frame::Dot { bright: true }
+            Frame::Breath { level: 4 }
+        );
+        assert_eq!(
+            tray_frame(&status, true, now, 8),
+            Frame::Breath { level: 0 }
         );
 
-        // A scan in flight quickens the breath.
+        // A scan in flight quickens the breath (half cycle).
         status.scanning = true;
         assert_eq!(
             tray_frame(&status, true, now, 0),
-            Frame::Dot { bright: true }
+            Frame::Breath { level: 0 }
         );
         assert_eq!(
-            tray_frame(&status, true, now, 1),
-            Frame::Dot { bright: false }
+            tray_frame(&status, true, now, 2),
+            Frame::Breath { level: 2 }
         );
         assert_eq!(tray_frame(&status, false, now, 0), Frame::Dimmed);
 
-        // After a complete scan the dot holds bright, then resumes.
+        // After a complete scan the glyph holds full brightness, then the
+        // calm breath resumes.
         status.scanning = false;
         status.last_successful_scan = Some(now);
         assert_eq!(
             tray_frame(&status, true, now, 0),
-            Frame::Dot { bright: true }
+            Frame::Breath { level: 4 }
         );
+        // At now + FLASH the hold has elapsed: the calm breath resumes.
         assert_eq!(
             tray_frame(&status, true, now + SCAN_FLASH_DURATION, 0),
-            Frame::Dot { bright: true }
+            Frame::Breath { level: 0 }
         );
         assert_eq!(
-            tray_frame(&status, true, now + SCAN_FLASH_DURATION, 2),
-            Frame::Dot { bright: false }
+            tray_frame(&status, true, now + SCAN_FLASH_DURATION, 1),
+            Frame::Breath { level: 1 }
         );
 
-        // The status line carries faults; the dot drops out.
+        // The status line carries faults; the breath drops out.
         status.last_successful_scan = None;
         status.phase = Some(Phase::Starting);
         assert_eq!(tray_frame(&status, true, now, 0), Frame::Plain);

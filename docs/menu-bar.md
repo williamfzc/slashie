@@ -16,7 +16,7 @@ Use one fixed-size `/` template icon with the accessible name `Slashie`. macOS s
 | --- | --- |
 | Polling paused | The whole glyph dimmed, completely still. |
 | Shutdown, a fault, or a retry — any state with a status line while polling is on | The plain glyph; the read-only line carries the detail. |
-| Polling healthy | A small dot beside the slashes breathing, never disappearing while the switch is on: calm about once a second between scans, quicker while a scan is in flight, holding bright for about a second and a half after a complete scan, including an empty one. |
+| Polling healthy | The whole glyph breathing smoothly on a one-second cycle — quicker while a scan is in flight, holding full brightness for about a second and a half after a complete scan, including an empty one. It never goes fully dark while the switch is on. |
 
 A primary click or keyboard activation opens the menu. This is the enabled state:
 
@@ -53,9 +53,10 @@ The window is a mirror of `config.json`, shown verbatim — not an editor. Edits
 
 | Area | Content |
 | --- | --- |
-| Runtime status | A read-only line with a small dot. It mirrors the [menu status](#status-item-and-menu): paused, the copy of any fault or retry, the scan in flight, or the interval and how long ago the last complete scan ran. The dot breathes only while a scan is in flight. It is not a live region, so screen readers read it on focus instead of announcing every refresh. Motion respects the system reduced-motion setting. |
-| Configuration | The raw `config.json`, verbatim, in a selectable monospace block under a small `config.json — live` label. |
-| Footer | `Edit Config` and `Open Log` on the left, a `slashie --skill` chip on the right. Disable `Open Log` when the log is unavailable. |
+| Runtime status | A read-only line with a small dot. It mirrors the [menu status](#status-item-and-menu): paused, the copy of any fault or retry, `Scanning…` while a scan runs, or a countdown to the next scan. It is not a live region, so screen readers read it on focus instead of announcing every refresh. Motion respects the system reduced-motion setting. |
+| Account | One muted line: the Feishu identity verified at startup and how its binding stands — `connected`, `sign-in required` when the identity fault shows, or `not verified` on an unconfigured startup. Hidden when no identity was verified. |
+| Configuration | The raw `config.json`, verbatim, in a selectable monospace block under a small `config.json` label. |
+| Footer | `Edit Config` and `Open Log` on the left, and one sentence on the right: an agent can manage this configuration too, pointed at the slashie CLI. Disable `Open Log` when the log is unavailable. |
 
 `Edit Config` opens `config.json` in the system's default text editor, like `Open Log` opens the log. The mirror refreshes about once a second while the window is visible, so file and CLI edits appear without reopening the window. When the configuration cannot be parsed, the mirror still shows the file verbatim with an explanation, and recovers by itself once the file is valid. Closing the window never loses anything: there is nothing to save.
 
@@ -63,7 +64,7 @@ The window is a mirror of `config.json`, shown verbatim — not an editor. Edits
 
 - From Finder, check the native menu in light and dark appearances. Verify keyboard navigation, Escape dismissal, and VoiceOver reading `Polling` and its checked state.
 - Launch both a bundled and an unbundled dev build and verify that neither shows a Dock icon or a Cmd+Tab entry while the tray item stays available.
-- Verify the dimmed glyph completely still while polling is off, and the dot breathing continuously while it is on: calm between scans, quicker during a scan, holding bright briefly after a scan completes (including an empty one). Verify the plain glyph, without the dot, during startup, scan failure, retry, and shutdown, and confirm the icon and neighboring items stay in place throughout. The motion must match the switch: nothing animates while polling is off.
+- Verify the dimmed glyph completely still while polling is off, and the whole glyph breathing while it is on: a one-second cycle between scans, quicker during a scan, holding full brightness briefly after a scan completes (including an empty one). Verify the plain glyph during startup, scan failure, retry, and shutdown, and confirm the icon and neighboring items stay in place throughout. The motion must match the switch: nothing animates while polling is off.
 - Verify the frames read at a glance in light and dark appearances and that the dot is visible without relying on color alone.
 - Turn polling off during a command and verify the [pause behavior](product.md#pause-and-recovery). Exercise backoff, failed setting writes, and an uncertain reply. Confirm normal states use the checkmark alone.
 - Open Settings while polling and verify the runtime status line shows the interval and scan age, switches to the breathing dot while a scan runs, and shows the paused copy when polling is off. Verify it carries the status-line copy during a fault, and that the dot does not animate when reduced motion is set.

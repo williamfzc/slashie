@@ -67,6 +67,7 @@
     @media (prefers-reduced-motion: reduce) {
       #runtime-dot.scanning { animation: none; }
     }
+    #account-line { color: var(--secondary); font-size: 12px; }
     .config label {
       display: block;
       font-size: 12px;
@@ -99,11 +100,7 @@
       border-top: 1px solid var(--line);
       padding: 10px 0 0;
     }
-    #skill-chip {
-      font: 11px/16px ui-monospace, Menlo, monospace;
-      color: var(--secondary);
-      user-select: all;
-    }
+    #agent-hint { color: var(--secondary); font-size: 11px; }
     .error { color: var(--error); font-size: 12px; overflow-wrap: anywhere; }
     #error:not(:empty) {
       border: 1px solid var(--error);
@@ -121,6 +118,7 @@
       <span id="runtime-dot" aria-hidden="true"></span>
       <span id="runtime-text">Checking the poller…</span>
     </p>
+    <p id="account-line" hidden></p>
 
     <section class="config" aria-labelledby="config-title">
       <label id="config-title">config.json</label>
@@ -133,7 +131,7 @@
         <button id="open-log" type="button" disabled>Open Log</button>
         <span id="log-error" class="error" role="alert"></span>
       </div>
-      <code id="skill-chip" title="The full operating contract, for you or an agent">slashie --skill</code>
+      <span id="agent-hint">An agent can manage this configuration too — just point it at the slashie CLI.</span>
     </footer>
   </main>
 
@@ -147,6 +145,7 @@
     const runtimeDot = document.getElementById("runtime-dot");
     const runtimeText = document.getElementById("runtime-text");
     const configText = document.getElementById("config-text");
+    const accountLine = document.getElementById("account-line");
     const openLog = document.getElementById("open-log");
     const editConfig = document.getElementById("edit-config");
     const logError = document.getElementById("log-error");
@@ -160,20 +159,24 @@
         runtimeText.textContent = "Paused";
       } else if (runtime.scanning) {
         runtimeDot.classList.add("on", "scanning");
-        runtimeText.textContent = `${runtime.poll_interval_secs}s · scanning`;
-      } else if (runtime.last_scan_age_secs == null) {
+        runtimeText.textContent = "Scanning…";
+      } else if (runtime.next_scan_in_secs != null) {
         runtimeDot.classList.add("on");
         runtimeDot.classList.remove("scanning");
-        runtimeText.textContent = `${runtime.poll_interval_secs}s · first scan soon`;
+        runtimeText.textContent = `Next scan in ${runtime.next_scan_in_secs}s`;
       } else {
         runtimeDot.classList.add("on");
         runtimeDot.classList.remove("scanning");
-        runtimeText.textContent = `${runtime.poll_interval_secs}s · last ${runtime.last_scan_age_secs}s ago`;
+        runtimeText.textContent = "Scanning…";
       }
     }
 
     function renderSettings(settings) {
       openLog.disabled = !settings.log_available;
+      accountLine.hidden = !settings.identity;
+      accountLine.textContent = settings.identity
+        ? `Account ${settings.identity} · ${settings.identity_status}`
+        : "";
       // The mirror shows the file as it is, valid or not; the banner only
       // explains why the runtime is ignoring it.
       configText.textContent = settings.config_text || "(empty)";

@@ -55,6 +55,8 @@ pub struct Runtime {
     /// True when this run created state.json: hosts use it to offer
     /// first-run guidance (menu-bar.md).
     pub fresh_install: bool,
+    /// When the run loop will next scan, as hosts show a countdown.
+    pub next_scan_at: Mutex<Option<std::time::Instant>>,
 }
 
 pub fn error(msg: impl Into<String>) -> String {
@@ -141,6 +143,7 @@ impl Runtime {
             status,
             self_arc: Mutex::new(None),
             fresh_install,
+            next_scan_at: Mutex::new(None),
         };
 
         // A failed state load blocks intake; writing defaults over the
@@ -704,6 +707,7 @@ impl Runtime {
                 Err(e) => self.logger.log(&format!("scan failed, will retry: {}", e)),
             }
             let wake = std::time::Instant::now() + interval;
+            *self.next_scan_at.lock().unwrap() = Some(wake);
             while std::time::Instant::now() < wake && !self.shutdown.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
