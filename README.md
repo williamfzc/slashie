@@ -7,7 +7,7 @@
   <img src="https://img.shields.io/badge/built%20with-Rust-orange.svg" alt="Rust">
 </p>
 
-Send `/command message` in Feishu. Slashie runs it on your machine and replies with the outcome — a menu-bar agent runtime that turns chat messages into local work.
+Send `/command message` in Feishu. Slashie hands the request and source message link to your local agent or script — a menu-bar agent runtime that turns chat messages into local work.
 
 No bots, no webhooks, no servers: Slashie polls through [Lark CLI](https://github.com/larksuite/cli) with your own account, so anything your Feishu identity can see, your machine can act on. One persistent agent session per conversation (chat or topic), and any local coding agent — Claude Code, Codex, Pi — can configure Slashie for you through its CLI.
 
@@ -43,7 +43,7 @@ slashie route remove /deploy
 slashie route list          # the route table as JSON
 ```
 
-Or open Settings and hit **Edit Config** — the window is a live mirror of the file, so CLI, agent, and window always agree. Commands receive the message text through `$SLASHIE_ARGS` and `$SLASHIE_PROMPT`; the full contract (variables, sessions, polling, limits) is one command away:
+Or open Settings and hit **Edit Config** — the window can inspect and save validated settings, so CLI, agent, and window always agree. Commands receive the message text through `$SLASHIE_ARGS` and `$SLASHIE_PROMPT`; the full contract (variables, sessions, polling, limits) is one command away:
 
 ```sh
 slashie --skill
@@ -53,12 +53,14 @@ slashie --skill
 
 Quit Slashie from its menu, then delete `~/.slashie` to remove its configuration, state, agent-session workspaces, and log; the next start is a fresh install. To reset one conversation's agent session instead, delete that conversation's directory under `~/.slashie/chats/` while Slashie is stopped.
 
+Slashie owns status reactions: `OnIt` means durably accepted, and successful work changes it to `DONE`. Failure never gets `DONE`. Text delivery belongs to the target agent; no text reply is required and missing text-send permission does not stop work. Use `reply_mode: "auto"` only for legacy stdout forwarding.
+
 ## How it works
 
 ```
 Feishu chat ──poll──▶ slashie (menu bar) ──▶ /bin/sh -c "<route cmd>"
      ▲                    │  claims, queues        │ output
-     └──── reply ◀────────┘  mailbox per chat      ▼
+     ◀── optional agent send  mailbox per chat      ▼
                         per-chat agent sessions   local tools
 ```
 
@@ -67,7 +69,7 @@ A shared Rust runtime drives everything: durable per-message claims in `state.js
 | Docs | |
 | --- | --- |
 | [Product specification](docs/product.md) | What a user can rely on: triggers, replies, faults, recovery. |
-| [Menu bar & Settings](docs/menu-bar.md) | The tray states, status copy, and the read-only Settings mirror. |
+| [Menu bar & Settings](docs/menu-bar.md) | The tray states, compact status, and on-demand settings. |
 | [Technical design](docs/DESIGN.md) | Runtime boundaries, the Feishu channel, mailboxes, claims, config schema. |
 | [Continuous integration](docs/ci.md) | The check matrix and the macOS packaging job. |
 

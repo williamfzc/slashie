@@ -5,7 +5,7 @@
 //! on one state mutex; claim updates and pause are persisted before work is
 //! handed off.
 
-use crate::config::{Config, Route, DEFAULT_TIMEOUT_SECS};
+use crate::config::{Config, ReplyMode, Route, DEFAULT_TIMEOUT_SECS};
 use crate::logging::{now_ms, Logger};
 use crate::state::{load_or_init, save, ClaimStatus, State, StateLoad};
 use crate::transport::{Channel, TransportError};
@@ -57,6 +57,9 @@ pub struct Runtime {
     pub fresh_install: bool,
     /// When the run loop will next scan, as hosts show a countdown.
     pub next_scan_at: Mutex<Option<std::time::Instant>>,
+    terminal_flush: Mutex<()>,
+    #[cfg(test)]
+    state_save_failure: Mutex<Option<usize>>,
 }
 
 pub fn error(msg: impl Into<String>) -> String {
@@ -144,6 +147,9 @@ impl Runtime {
             self_arc: Mutex::new(None),
             fresh_install,
             next_scan_at: Mutex::new(None),
+            terminal_flush: Mutex::new(()),
+            #[cfg(test)]
+            state_save_failure: Mutex::new(None),
         };
 
         // A failed state load blocks intake; writing defaults over the
@@ -337,6 +343,83 @@ impl Runtime {
         }
     }
 
+    /// Production persistence; fault injection is compiled into tests only.
+    fn persist_state(&self, state: &State) -> std::io::Result<()> {
+        #[cfg(test)]
+        {
+            let mut fail = self.state_save_failure.lock().unwrap();
+            if let Some(left) = fail.as_mut() {
+                if *left == 0 {
+                    *fail = None;
+                    return Err(std::io::Error::other("injected state write failure"));
+                }
+                *left -= 1;
+            }
+        }
+        save(&self.home, state)
+    }
+
+    /// Flush deferred terminal feedback only after the entire state is durable.
+    /// Retries status I/O, never command execution or text delivery.
+    fn flush_terminal_reactions(&self) {
+        let Ok(_flush) = self.terminal_flush.try_lock() else {
+            return;
+        };
+        if self.shutdown.load(Ordering::SeqCst) || self.is_intake_blocked() {
+            return;
+        }
+        let pending = {
+            let st = self.state.lock().unwrap();
+            let pending: Vec<_> = st
+                .claims
+                .iter()
+                .filter_map(|c| {
+                    c.terminal_reaction_pending.map(|success| {
+                        (
+                            c.message_id.clone(),
+                            success,
+                            c.processing_reaction_id.clone(),
+                        )
+                    })
+                })
+                .collect();
+            if pending.is_empty() {
+                return;
+            }
+            if let Err(e) = self.persist_state(&st) {
+                self.logger
+                    .log(&format!("terminal status awaits durable state: {}", e));
+                return;
+            }
+            pending
+        };
+        for (id, succeeded, processing_id) in pending {
+            if self.shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            match self
+                .transport
+                .react_finished(&id, succeeded, processing_id.as_deref())
+            {
+                Ok(()) => {
+                    let mut st = self.state.lock().unwrap();
+                    if let Some(c) = st.claims.iter_mut().find(|c| c.message_id == id) {
+                        c.terminal_reaction_pending = None;
+                    }
+                    if let Err(e) = self.persist_state(&st) {
+                        self.logger.log(&format!(
+                            "cannot persist completed reaction for {}: {}",
+                            id, e
+                        ));
+                    }
+                }
+                Err(e) => self
+                    .logger
+                    .log(&format!("terminal reaction failed for {}: {}", id, e)),
+            }
+        }
+    }
+
     /// One scan with a fixed end time. Admits eligible messages in creation
     /// order (message ID tiebreaker), durably claiming each before returning
     /// it for delivery to its conversation mailbox. `status.scanning` spans
@@ -350,6 +433,7 @@ impl Runtime {
 
     fn scan_inner(&self) -> Result<Vec<Job>, String> {
         self.maybe_reload_config();
+        self.flush_terminal_reactions();
         self.status.lock().unwrap().last_successful_scan = None;
         if self.shutdown.load(Ordering::SeqCst) || self.is_intake_blocked() {
             return Ok(Vec::new());
@@ -505,15 +589,41 @@ impl Runtime {
                         .log("queue full; leaving candidates for a later scan");
                     break;
                 }
-                st.add_claim(&m.id, now_ms());
-                if let Err(e) = save(&self.home, &st) {
+                // Save a candidate snapshot first. A failed claim must not enter
+                // memory, and must not discard earlier durable jobs in this scan.
+                let mut candidate = st.clone();
+                candidate.add_claim(&m.id, now_ms());
+                if let Err(e) = self.persist_state(&candidate) {
                     self.logger
                         .log(&format!("ERROR cannot persist claim for {}: {}", m.id, e));
-                    return Err(error(format!("claim persist failed: {}", e)));
+                    break;
                 }
+                *st = candidate;
             }
             self.logger
                 .log(&format!("claimed {} for route {}", m.id, route.prefix));
+            // Software acceptance is independent of Agent text delivery. Never
+            // hold the state mutex during network I/O or acknowledge before save.
+            if !self.shutdown.load(Ordering::SeqCst) {
+                match self.transport.react_processing(&m.id) {
+                    Ok(Some(id)) => {
+                        let mut st = self.state.lock().unwrap();
+                        if let Some(claim) = st.claims.iter_mut().find(|c| c.message_id == m.id) {
+                            claim.processing_reaction_id = Some(id);
+                        }
+                        if let Err(e) = self.persist_state(&st) {
+                            self.logger.log(&format!(
+                                "cannot persist acknowledgment for {}: {}",
+                                m.id, e
+                            ));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => self
+                        .logger
+                        .log(&format!("acceptance reaction failed for {}: {}", m.id, e)),
+                }
+            }
             if extra == 0 && !self.mailboxes.is_tracked(&key) {
                 promised_new += 1;
             }
@@ -538,6 +648,7 @@ impl Runtime {
             st.record_scan_end(end);
             st.claims.retain(|c| {
                 !(c.status == ClaimStatus::Settled
+                    && c.terminal_reaction_pending.is_none()
                     && c.settled_at_ms.map(|t| t < horizon).unwrap_or(false))
             });
             if let Err(e) = save(&self.home, &st) {
@@ -554,16 +665,9 @@ impl Runtime {
         Ok(jobs)
     }
 
-    /// Run one job to completion: processing reaction, command, reply, settle.
+    /// Run accepted work, settle durably, then update software status.
     pub fn process_job(&self, job: Job) {
-        if !self.shutdown.load(Ordering::SeqCst) {
-            if let Err(e) = self.transport.react_processing(&job.message.id) {
-                self.logger.log(&format!(
-                    "processing reaction failed for {}: {}",
-                    job.message.id, e
-                ));
-            }
-        }
+        let auto_reply = self.config.lock().unwrap().reply_mode == ReplyMode::Auto;
         // Fixed at admission; a config swap mid-queue never reroutes a job.
         let key = job.key.clone();
         let mut session = SessionEnv {
@@ -596,30 +700,72 @@ impl Runtime {
                 }
             }
         }
-        let inputs = build_inputs(&job.route.prefix, &job.message, &key);
+        let mut message = job.message.clone();
+        let link_result = if self.shutdown.load(Ordering::SeqCst) {
+            Ok(message.link.clone())
+        } else {
+            self.transport.message_link(&message)
+        };
+        if let Ok(link) = &link_result {
+            message.link = link.clone();
+        }
+        let mut inputs = build_inputs(&job.route.prefix, &message, &key);
+        if let Some(default_prompt) = self
+            .config
+            .lock()
+            .unwrap()
+            .default_prompts
+            .get(&job.route.prefix)
+            .filter(|p| !p.trim().is_empty())
+        {
+            inputs.prompt = format!("{}\n\n{}", default_prompt, inputs.prompt);
+        }
         let timeout_secs = job.route.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS);
         // Commands started after a config swap use the new subprocess path.
         let process_path = self.config.lock().unwrap().process_path.clone();
-        let outcome = run_command_with(
-            &job.route,
-            &inputs,
-            &session,
-            &process_path,
-            &home_dir(),
-            self.shutdown.clone(),
-        );
+        let outcome = if self.shutdown.load(Ordering::SeqCst) {
+            crate::worker::Outcome {
+                reply_text: "Canceled: Slashie is shutting down.".into(),
+                termination: "shutdown".into(),
+                exit_code: None,
+                duration_ms: 0,
+            }
+        } else {
+            match link_result {
+                Ok(_) => run_command_with(
+                    &job.route,
+                    &inputs,
+                    &session,
+                    &process_path,
+                    &home_dir(),
+                    self.shutdown.clone(),
+                ),
+                Err(error) => crate::worker::Outcome {
+                    reply_text: format!("Handoff not started. {}", error),
+                    termination: "source_unavailable".into(),
+                    exit_code: None,
+                    duration_ms: 0,
+                },
+            }
+        };
         self.logger.log(&format!(
             "command for {} {} after {}ms (exit {:?})",
             job.message.id, outcome.termination, outcome.duration_ms, outcome.exit_code
         ));
 
-        // Exactly one reply attempt targeting the original message.
-        let reply_result =
-            self.transport
-                .reply(&job.message.id, &outcome.reply_text, key.topic_id.is_some());
+        // The agent owns text delivery. Software reactions use work state only.
+        let reply_result = if auto_reply {
+            Some(
+                self.transport
+                    .reply(&job.message.id, &outcome.reply_text, key.topic_id.is_some()),
+            )
+        } else {
+            None
+        };
         let mut delivered_reply_id: Option<String> = None;
         let reply_state = match reply_result {
-            Ok(reply_id) => {
+            None => "agent_delivery".to_string(),
+            Some(Ok(reply_id)) => {
                 self.logger.log(&format!(
                     "reply sent to {} (reply {})",
                     job.message.id, reply_id
@@ -631,13 +777,13 @@ impl Runtime {
                 delivered_reply_id = Some(reply_id);
                 "reply_sent".to_string()
             }
-            Err(crate::transport::ReplyError::Rejected(m)) => {
+            Some(Err(crate::transport::ReplyError::Rejected(m))) => {
                 self.logger
                     .log(&format!("reply rejected for {}: {}", job.message.id, m));
                 self.status.lock().unwrap().reply_failed = true;
                 "reply_rejected".to_string()
             }
-            Err(crate::transport::ReplyError::Uncertain(m)) => {
+            Some(Err(crate::transport::ReplyError::Uncertain(m))) => {
                 self.logger.log(&format!(
                     "reply delivery uncertain for {}: {} (no resend)",
                     job.message.id, m
@@ -649,8 +795,14 @@ impl Runtime {
             }
         };
 
-        let outcome_code = format!("{}:{}", outcome.termination, reply_state);
-        {
+        let work_result =
+            if !auto_reply && outcome.termination == "exit" && outcome.exit_code != Some(0) {
+                "failed"
+            } else {
+                &outcome.termination
+            };
+        let outcome_code = format!("{}:{}", work_result, reply_state);
+        let settled = {
             let mut st = self.state.lock().unwrap();
             // A successful run leaves a resumable agent session in the
             // conversation workspace; remember it before the durable settle.
@@ -663,15 +815,32 @@ impl Runtime {
                 &outcome_code,
                 delivered_reply_id.as_deref(),
             );
-            if let Err(e) = save(&self.home, &st) {
-                self.logger.log(&format!(
-                    "ERROR cannot persist settle for {}: {}",
-                    job.message.id, e
-                ));
+            if outcome.termination != "shutdown" {
+                if let Some(c) = st
+                    .claims
+                    .iter_mut()
+                    .find(|c| c.message_id == job.message.id)
+                {
+                    c.terminal_reaction_pending =
+                        Some(outcome.termination == "exit" && outcome.exit_code == Some(0));
+                }
             }
+            match self.persist_state(&st) {
+                Ok(()) => true,
+                Err(e) => {
+                    self.logger.log(&format!(
+                        "ERROR cannot persist settle for {}: {}",
+                        job.message.id, e
+                    ));
+                    false
+                }
+            }
+        };
+        if settled {
+            self.logger
+                .log(&format!("settled {} ({})", job.message.id, outcome_code));
+            self.flush_terminal_reactions();
         }
-        self.logger
-            .log(&format!("settled {} ({})", job.message.id, outcome_code));
         let _ = timeout_secs;
     }
 
@@ -802,15 +971,24 @@ mod tests {
         fixture: MockFixture,
         boundary_ms: i64,
     ) -> (Runtime, Arc<MockTransport>, PathBuf) {
-        init_rt_with_config(name, fixture, boundary_ms, Config::default())
+        init_rt_with_config(
+            name,
+            fixture,
+            boundary_ms,
+            Config {
+                reply_mode: ReplyMode::Auto,
+                ..Config::default()
+            },
+        )
     }
 
     fn init_rt_with_config(
         name: &str,
         fixture: MockFixture,
         boundary_ms: i64,
-        config: Config,
+        mut config: Config,
     ) -> (Runtime, Arc<MockTransport>, PathBuf) {
+        config.reply_mode = ReplyMode::Auto;
         let home = test_home(name);
         let mock = Arc::new(MockTransport::new(fixture));
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -1694,6 +1872,395 @@ mod tests {
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].text, "[ keep\nthese\nlines]");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn handoff_forwards_default_prompt_and_exact_source_link() {
+        let now = now_ms();
+        let mut msg = mkmsg(
+            "om_handoff",
+            now,
+            "ou_self",
+            Some("/ping continue work"),
+            true,
+            false,
+        );
+        msg.link = Some(
+            "https://applink.feishu.cn/client/chat/open?openChatId=oc_test&position=28".into(),
+        );
+        let (rt, mock, home) =
+            init_rt("handoff-input", fixture_with(vec![msg.clone()]), now - 1000);
+        rt.config
+            .lock()
+            .unwrap()
+            .default_prompts
+            .insert("/ping".into(), "Read the linked conversation first.".into());
+        let mut route = rt.config.lock().unwrap().routes[0].clone();
+        route.cmd = "printf '%s\\n%s' \"$SLASHIE_PROMPT\" \"$SLASHIE_LINK\"".into();
+        rt.process_job(Job {
+            key: test_key("oc_test", None),
+            message: msg,
+            route,
+        });
+        let replies = mock.reply_records();
+        assert!(replies[0]
+            .text
+            .starts_with("Read the linked conversation first."));
+        assert!(replies[0].text.contains("continue work"));
+        assert!(replies[0].text.contains(
+            "link: https://applink.feishu.cn/client/chat/open?openChatId=oc_test&position=28"
+        ));
+        assert!(replies[0].text.ends_with("&position=28"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn agent_completes_without_text_reply_even_if_reactions_are_denied() {
+        let now = now_ms();
+        let mut fixture = fixture_with(vec![mkmsg(
+            "om_agent",
+            now - 1,
+            "ou_self",
+            Some("/ping work"),
+            true,
+            false,
+        )]);
+        fixture.behavior.reply_rejected = true;
+        fixture.behavior.reaction_rejected = true;
+        let (rt, mock, home) = init_rt("agent-delivery", fixture, now - 1000);
+        rt.config.lock().unwrap().reply_mode = ReplyMode::Agent;
+        let jobs = rt.scan_once().unwrap();
+        assert_eq!(jobs.len(), 1);
+        rt.process_job(jobs.into_iter().next().unwrap());
+        assert_eq!(*mock.reaction_attempts.lock().unwrap(), ["om_agent"]);
+        assert!(mock.terminal_reactions.lock().unwrap()[0].1);
+        assert!(mock.reply_records().is_empty());
+        let st = rt.state.lock().unwrap();
+        assert_eq!(st.claims[0].outcome.as_deref(), Some("exit:agent_delivery"));
+        assert!(!rt.status.lock().unwrap().reply_failed);
+        drop(st);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn queued_agent_work_settles_as_shutdown_without_starting() {
+        let now = now_ms();
+        let fixture = fixture_with(vec![mkmsg(
+            "om_agent_canceled",
+            now - 1,
+            "ou_self",
+            Some("/ping work"),
+            true,
+            false,
+        )]);
+        let (rt, mock, home) = init_rt("agent-canceled", fixture, now - 1000);
+        rt.config.lock().unwrap().reply_mode = ReplyMode::Agent;
+        let job = rt.scan_once().unwrap().remove(0);
+        rt.shutdown.store(true, Ordering::SeqCst);
+        rt.process_job(job);
+        assert!(mock.reply_records().is_empty());
+        assert_eq!(
+            rt.state.lock().unwrap().claims[0].outcome.as_deref(),
+            Some("shutdown:agent_delivery")
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn failed_agent_work_is_not_successful_silent_completion() {
+        let now = now_ms();
+        let fixture = fixture_with(vec![mkmsg(
+            "om_agent_failed",
+            now - 1,
+            "ou_self",
+            Some("/ping work"),
+            true,
+            false,
+        )]);
+        let (rt, mock, home) = init_rt("agent-failed", fixture, now - 1000);
+        {
+            let mut cfg = rt.config.lock().unwrap();
+            cfg.reply_mode = ReplyMode::Agent;
+            cfg.routes[0].cmd = "exit 3".into();
+        }
+        let job = rt.scan_once().unwrap().remove(0);
+        rt.process_job(job);
+        assert!(mock.reply_records().is_empty());
+        assert!(!mock.terminal_reactions.lock().unwrap()[0].1);
+        assert_eq!(
+            rt.state.lock().unwrap().claims[0].outcome.as_deref(),
+            Some("failed:agent_delivery")
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn software_reactions_do_not_depend_on_agent_text_delivery() {
+        let now = now_ms();
+        let fixture = fixture_with(vec![mkmsg(
+            "om_silent",
+            now - 1,
+            "ou_self",
+            Some("/ping record meeting notes"),
+            true,
+            false,
+        )]);
+        let (rt, mock, home) = init_rt("silent-status", fixture, now - 1000);
+        rt.config.lock().unwrap().reply_mode = ReplyMode::Agent;
+        let mut jobs = rt.scan_once().unwrap();
+        assert_eq!(*mock.reaction_attempts.lock().unwrap(), ["om_silent"]);
+        assert!(mock.terminal_reactions.lock().unwrap().is_empty());
+        let st = match load_or_init(&home).unwrap() {
+            StateLoad::Loaded(s) => s,
+            _ => panic!(),
+        };
+        assert_eq!(
+            st.claims[0].processing_reaction_id.as_deref(),
+            Some("reaction-om_silent")
+        );
+        assert!(rt.scan_once().unwrap().is_empty());
+        assert_eq!(mock.reaction_attempts.lock().unwrap().len(), 1);
+        rt.process_job(jobs.remove(0));
+        assert!(mock.reply_records().is_empty());
+        assert_eq!(
+            *mock.terminal_reactions.lock().unwrap(),
+            vec![("om_silent".into(), true, Some("reaction-om_silent".into()),)]
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn timed_out_work_gets_error_not_done() {
+        let now = now_ms();
+        let fixture = fixture_with(vec![mkmsg(
+            "om_timeout_status",
+            now - 1,
+            "ou_self",
+            Some("/ping wait for meeting notes"),
+            true,
+            false,
+        )]);
+        let (rt, mock, home) = init_rt("timeout-status", fixture, now - 1000);
+        {
+            let mut cfg = rt.config.lock().unwrap();
+            cfg.reply_mode = ReplyMode::Agent;
+            cfg.routes[0].cmd = "sleep 20".into();
+            cfg.routes[0].timeout = Some(1);
+        }
+        let job = rt.scan_once().unwrap().remove(0);
+        rt.process_job(job);
+        assert!(!mock.terminal_reactions.lock().unwrap()[0].1);
+        assert!(mock.reply_records().is_empty());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn unavailable_source_marks_error_without_starting_command() {
+        let now = now_ms();
+        let mut fixture = fixture_with(vec![mkmsg(
+            "om_no_source",
+            now - 1,
+            "ou_self",
+            Some("/ping prepare meeting notes"),
+            true,
+            false,
+        )]);
+        fixture.behavior.source_link_unavailable = true;
+        let (rt, mock, home) = init_rt("no-source-status", fixture, now - 1000);
+        rt.config.lock().unwrap().reply_mode = ReplyMode::Agent;
+        let mut job = rt.scan_once().unwrap().remove(0);
+        job.route.cmd = format!("touch '{}'", home.join("must-not-start").display());
+        rt.process_job(job);
+        assert!(!home.join("must-not-start").exists());
+        assert!(!mock.terminal_reactions.lock().unwrap()[0].1);
+        assert_eq!(
+            rt.state.lock().unwrap().claims[0].outcome.as_deref(),
+            Some("source_unavailable:agent_delivery")
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn later_claim_write_failure_preserves_previous_jobs_and_retries_failed_claim() {
+        let now = now_ms();
+        let fixture = fixture_with(vec![
+            mkmsg(
+                "om_first",
+                now - 2,
+                "ou_self",
+                Some("/ping first meeting task"),
+                true,
+                false,
+            ),
+            mkmsg(
+                "om_second",
+                now - 1,
+                "ou_self",
+                Some("/ping second meeting task"),
+                true,
+                false,
+            ),
+        ]);
+        let (rt, mock, home) = init_rt("claim-write-fault", fixture, now - 1000);
+        // First claim and confirmed acknowledgment save; second claim fails.
+        *rt.state_save_failure.lock().unwrap() = Some(2);
+        let jobs = rt.scan_once().unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].message.id, "om_first");
+        assert!(!rt.state.lock().unwrap().is_consumed("om_second"));
+        assert_eq!(*mock.reaction_attempts.lock().unwrap(), ["om_first"]);
+        rt.process_job(jobs.into_iter().next().unwrap());
+        let jobs = rt.scan_once().unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].message.id, "om_second");
+        rt.process_job(jobs.into_iter().next().unwrap());
+        assert_eq!(rt.state.lock().unwrap().waiting_count(), 0);
+        assert_eq!(mock.reply_records().len(), 2);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn settle_write_recovers_terminal_status_without_repeating_work_or_text() {
+        let now = now_ms();
+        let fixture = fixture_with(vec![mkmsg(
+            "om_settle",
+            now - 1,
+            "ou_self",
+            Some("/ping prepare meeting"),
+            true,
+            false,
+        )]);
+        let (rt, mock, home) = init_rt("settle-write-fault", fixture, now - 1000);
+        let job = rt.scan_once().unwrap().remove(0);
+        *rt.state_save_failure.lock().unwrap() = Some(0);
+        rt.process_job(job);
+        assert_eq!(mock.reply_records().len(), 1);
+        assert!(mock.terminal_reactions.lock().unwrap().is_empty());
+        let disk = match load_or_init(&home).unwrap() {
+            StateLoad::Loaded(s) => s,
+            _ => panic!(),
+        };
+        assert_eq!(disk.claims[0].status, ClaimStatus::Pending);
+        assert!(rt.scan_once().unwrap().is_empty());
+        assert_eq!(mock.reply_records().len(), 1);
+        assert_eq!(mock.terminal_reactions.lock().unwrap().len(), 1);
+        let disk = match load_or_init(&home).unwrap() {
+            StateLoad::Loaded(s) => s,
+            _ => panic!(),
+        };
+        assert_eq!(disk.claims[0].status, ClaimStatus::Settled);
+        assert!(disk.claims[0].terminal_reaction_pending.is_none());
+        assert!(rt.scan_once().unwrap().is_empty());
+        assert_eq!(mock.terminal_reactions.lock().unwrap().len(), 1);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn terminal_failure_retries_only_status_and_not_work_or_text() {
+        let now = now_ms();
+        let fixture = fixture_with(vec![mkmsg(
+            "om_terminal_retry",
+            now - 1,
+            "ou_self",
+            Some("/ping prepare meeting"),
+            true,
+            false,
+        )]);
+        let (rt, mock, home) = init_rt("terminal-retry", fixture, now - 1000);
+        *mock.terminal_failures_left.lock().unwrap() = 1;
+        rt.process_job(rt.scan_once().unwrap().remove(0));
+        assert_eq!(mock.reply_records().len(), 1);
+        assert_eq!(
+            rt.state.lock().unwrap().claims[0].terminal_reaction_pending,
+            Some(true)
+        );
+        assert!(rt.scan_once().unwrap().is_empty());
+        assert_eq!(mock.terminal_reactions.lock().unwrap().len(), 2);
+        assert_eq!(mock.reply_records().len(), 1);
+        assert!(rt.state.lock().unwrap().claims[0]
+            .terminal_reaction_pending
+            .is_none());
+        assert!(rt.scan_once().unwrap().is_empty());
+        assert_eq!(mock.terminal_reactions.lock().unwrap().len(), 2);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn completed_reaction_clear_write_failure_is_safe_on_restart() {
+        let now = now_ms();
+        let (rt, mock, home) = init_rt("terminal-clear-fault", fixture_with(vec![]), now - 1000);
+        {
+            let mut st = rt.state.lock().unwrap();
+            st.add_claim("om_terminal", now - 1);
+            st.settle_claim("om_terminal", now, "failed:agent_delivery", None);
+            st.claims[0].processing_reaction_id = Some("own-OnIt".into());
+            st.claims[0].terminal_reaction_pending = Some(false);
+            save(&home, &st).unwrap();
+        }
+        // Initial full-state flush succeeds; clearing the sent intent fails.
+        *rt.state_save_failure.lock().unwrap() = Some(1);
+        rt.flush_terminal_reactions();
+        assert_eq!(mock.terminal_reactions.lock().unwrap().len(), 1);
+        let disk = match load_or_init(&home).unwrap() {
+            StateLoad::Loaded(s) => s,
+            _ => panic!(),
+        };
+        assert_eq!(disk.claims[0].terminal_reaction_pending, Some(false));
+        let resumed = Runtime::init(
+            home.clone(),
+            LoadedConfig {
+                config: Config::default(),
+                fault: None,
+            },
+            mock.clone(),
+            "ou_self".into(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Logger::new(&home, false)),
+            Some(false),
+        )
+        .unwrap();
+        assert!(resumed.scan_once().unwrap().is_empty());
+        let terminal = mock.terminal_reactions.lock().unwrap();
+        assert_eq!(terminal.len(), 2);
+        assert!(terminal
+            .iter()
+            .all(|(_, success, id)| !success && id.as_deref() == Some("own-OnIt")));
+        assert!(mock.reply_records().is_empty());
+        drop(terminal);
+        assert!(resumed.scan_once().unwrap().is_empty());
+        assert_eq!(mock.terminal_reactions.lock().unwrap().len(), 2);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn pending_terminal_status_survives_restart_and_is_not_reexecuted() {
+        let now = now_ms();
+        let (rt, mock, home) = init_rt("terminal-restart", fixture_with(vec![]), now - 1000);
+        {
+            let mut st = rt.state.lock().unwrap();
+            st.add_claim("om_completed", now - 1);
+            st.settle_claim("om_completed", now, "exit:agent_delivery", None);
+            st.claims[0].terminal_reaction_pending = Some(true);
+            save(&home, &st).unwrap();
+        }
+        let logger = Arc::new(Logger::new(&home, false));
+        let resumed = Runtime::init(
+            home.clone(),
+            LoadedConfig {
+                config: Config::default(),
+                fault: None,
+            },
+            mock.clone(),
+            "ou_self".into(),
+            Arc::new(AtomicBool::new(false)),
+            logger,
+            Some(false),
+        )
+        .unwrap();
+        assert!(resumed.scan_once().unwrap().is_empty());
+        assert_eq!(mock.terminal_reactions.lock().unwrap().len(), 1);
+        assert!(mock.reply_records().is_empty());
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

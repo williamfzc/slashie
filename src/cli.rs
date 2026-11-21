@@ -97,6 +97,7 @@ fn remove(home: &Path, args: &mut impl Iterator<Item = String>) -> Result<String
     let mut cfg = load_or_default(home)?;
     let before = cfg.routes.len();
     cfg.routes.retain(|r| r.prefix != prefix);
+    cfg.default_prompts.remove(&prefix);
     if cfg.routes.len() == before {
         return Err(format!("no route {:?} to remove", prefix));
     }
@@ -146,7 +147,10 @@ pub fn skill(home: &Path) -> String {
          \n\
          Slashie watches the user's Feishu chats for messages that start with a route\n\
          prefix (like `/deploy`) and runs that route's shell command on this machine,\n\
-         then replies to the original message with the outcome.\n\
+         then hands the request and source message link to that agent or script.\n\
+         Slashie acknowledges accepted work and updates its completion reaction.\n\
+         The agent decides whether to send text through its own authorized tools;\n\
+         not replying is allowed. Only explicit reply_mode=auto forwards stdout.\n\
          \n\
          # Files\n\
          \n\

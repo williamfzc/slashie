@@ -581,7 +581,8 @@ mod tests {
         let started = std::time::Instant::now();
         let out = run_command(&r, "", "", &[], "/tmp", shutdown);
         assert_eq!(out.termination, "timeout");
-        assert_eq!(out.reply_text, "Command timed out.");
+        assert!(out.reply_text.starts_with("Command timed out."));
+        // The shell may append platform-specific child termination diagnostics.
         // 1s timeout + up to 2s SIGTERM wait, well under the 30s child runtime.
         assert!(started.elapsed().as_secs() < 10);
     }

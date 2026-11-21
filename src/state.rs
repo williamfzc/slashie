@@ -33,6 +33,12 @@ pub struct Claim {
     /// admitted as a new command, including in a topic/thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_id: Option<String>,
+    /// Confirmed software acknowledgment; absent for old state or denied writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processing_reaction_id: Option<String>,
+    /// Deferred terminal status: persisted work succeeded/failed, no command replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_reaction_pending: Option<bool>,
 }
 
 /// One chat route that already has a local agent session. The workspace is
@@ -182,6 +188,8 @@ impl State {
             settled_at_ms: None,
             outcome: None,
             reply_id: None,
+            processing_reaction_id: None,
+            terminal_reaction_pending: None,
         });
     }
 

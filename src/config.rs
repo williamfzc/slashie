@@ -46,6 +46,15 @@ pub struct Route {
     pub session: Option<String>,
 }
 
+/// Agent owns delivery by default; legacy stdout forwarding is opt-in.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyMode {
+    #[default]
+    Agent,
+    Auto,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -56,6 +65,11 @@ pub struct Config {
     pub poll_interval: u64,
     #[serde(default)]
     pub routes: Vec<Route>,
+    /// Per-route defaults passed as data, never interpolated into shell code.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub default_prompts: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub reply_mode: ReplyMode,
 }
 
 impl Default for Config {
@@ -64,6 +78,8 @@ impl Default for Config {
             lark_cli: None,
             process_path: DEFAULT_PROCESS_PATH.iter().map(|s| s.to_string()).collect(),
             poll_interval: DEFAULT_POLL_INTERVAL,
+            default_prompts: Default::default(),
+            reply_mode: ReplyMode::Agent,
             routes: [
                 ("/ping", "echo pong", None, None),
                 // Pi treats positional inputs starting with `@` as attachments.
@@ -178,6 +194,17 @@ pub fn validate(cfg: &Config) -> Result<(), ConfigError> {
             }
         }
     }
+    for (prefix, prompt) in &cfg.default_prompts {
+        if !cfg.routes.iter().any(|r| &r.prefix == prefix) {
+            return err(format!("default prompt has no route {:?}", prefix));
+        }
+        if prompt.chars().count() > 32_768 {
+            return err(format!(
+                "default prompt for {:?} exceeds 32768 characters",
+                prefix
+            ));
+        }
+    }
     for dir in &cfg.process_path {
         if !Path::new(dir).is_absolute() {
             return err(format!("process_path entries must be absolute: {:?}", dir));
@@ -256,6 +283,18 @@ pub fn atomic_write(path: &Path, text: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_prompts_require_a_route_and_roundtrip() {
+        let mut cfg = Config::default();
+        cfg.default_prompts
+            .insert("/ping".into(), "Keep it concise".into());
+        let text = serde_json::to_string(&cfg).unwrap();
+        assert_eq!(Config::parse(&text).unwrap(), cfg);
+        cfg.default_prompts
+            .insert("/missing".into(), "hello".into());
+        assert!(validate(&cfg).is_err());
+    }
 
     #[test]
     fn default_config_is_valid_and_has_route_presets() {
@@ -404,6 +443,17 @@ mod tests {
         validate(&cfg).unwrap();
         cfg.lark_cli.as_mut().unwrap().profile = "  ".into();
         assert!(validate(&cfg).is_err());
+    }
+
+    #[test]
+    fn agent_delivery_is_default_and_auto_is_explicit() {
+        let cfg = Config::parse(r#"{"poll_interval":10,"routes":[]}"#).unwrap();
+        assert_eq!(cfg.reply_mode, ReplyMode::Agent);
+        let cfg = Config::parse(r#"{"poll_interval":10,"routes":[],"reply_mode":"auto"}"#).unwrap();
+        assert_eq!(cfg.reply_mode, ReplyMode::Auto);
+        assert!(
+            Config::parse(r#"{"poll_interval":10,"routes":[],"reply_mode":"unknown"}"#).is_err()
+        );
     }
 
     #[test]

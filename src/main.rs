@@ -39,7 +39,7 @@ extern "C" fn on_signal(_sig: libc::c_int) {
 fn print_help() {
     println!(
         "slashie {}\n\
-         Send a slash command in Feishu, run it locally, reply with the outcome.\n\
+         Send a slash command in Feishu and hand it to your local agent or script.\n\
          \n\
          USAGE:\n\
              slashie [OPTIONS]\n\

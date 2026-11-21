@@ -1,244 +1,51 @@
 <!doctype html>
-<!-- Settings view for the macOS host: a read-only mirror of the live
-     configuration. Every edit goes through the slashie CLI; this window
-     reflects config.json and the runtime state as they are. -->
+<!-- Handoff controls: listening and delivery evidence come first. Route
+     programs and default prompts are secondary, validated configuration edits. -->
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Slashie Settings</title>
-  <style>
-    :root {
-      color-scheme: light dark;
-      font: 13px/1.4 -apple-system, BlinkMacSystemFont, sans-serif;
-      --background: #f5f5f7;
-      --surface: #fff;
-      --ink: #202124;
-      --secondary: #5f636a;
-      --line: #d7d7dc;
-      --accent: #005fce;
-      --error: #ac211e;
-      --ok: #34a853;
-    }
-
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --background: #242426;
-        --surface: #303033;
-        --ink: #f2f2f4;
-        --secondary: #b9b9bf;
-        --line: #545459;
-        --accent: #83b9ff;
-        --error: #ff9b91;
-        --ok: #6dd58c;
-      }
-    }
-
-    * { box-sizing: border-box; }
-    [hidden] { display: none !important; }
-    body { margin: 0; background: var(--background); color: var(--ink); }
-    main { display: flex; flex-direction: column; gap: 14px; height: 100dvh; padding: 20px; overflow: auto; }
-    p { margin: 0; }
-    button { font: inherit; min-height: 30px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); padding: 4px 10px; }
-    button:enabled { cursor: pointer; }
-    button:enabled:hover { border-color: var(--secondary); }
-    button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    button:disabled { opacity: .55; }
-    .runtime-status {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      color: var(--secondary);
-      font-size: 12px;
-    }
-    #runtime-dot {
-      flex-shrink: 0;
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--line);
-    }
-    #runtime-dot.on { background: var(--ok); }
-    #runtime-dot.scanning { animation: breathe 1s ease-in-out infinite; }
-    @keyframes breathe {
-      0%, 100% { opacity: .4; }
-      50% { opacity: 1; }
-    }
-    @media (prefers-reduced-motion: reduce) {
-      #runtime-dot.scanning { animation: none; }
-    }
-    #account-line { color: var(--secondary); font-size: 12px; }
-    .config label {
-      display: block;
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--secondary);
-      margin-bottom: 6px;
-    }
-    #config-text {
-      margin: 0;
-      max-height: 240px;
-      overflow: auto;
-      font: 11px/16px ui-monospace, Menlo, monospace;
-      white-space: pre;
-      user-select: all;
-    }
-    .hint { color: var(--secondary); font-size: 12px; }
-    .hint code {
-      padding: 1px 5px;
-      background: var(--surface);
-      border: 1px solid var(--line);
-      border-radius: 4px;
-      user-select: all;
-    }
-    footer {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 14px;
-      margin-top: auto;
-      border-top: 1px solid var(--line);
-      padding: 10px 0 0;
-    }
-    #agent-hint { color: var(--secondary); font-size: 11px; }
-    .error { color: var(--error); font-size: 12px; overflow-wrap: anywhere; }
-    #error:not(:empty) {
-      border: 1px solid var(--error);
-      border-radius: 8px;
-      padding: 8px 10px;
-    }
-  </style>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#fafafa"><title>Slashie</title>
+<style>
+:root{color-scheme:light dark;font:13px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;--bg:#fafafa;--ink:#252525;--muted:#737373;--line:#e3e3e3;--hover:#f0f0f0;--green:#267459;--amber:#986218;--red:#b13541;--focus:#386bb7}
+@media(prefers-color-scheme:dark){:root{--bg:#202020;--ink:#ececec;--muted:#aaa;--line:#3a3a3a;--hover:#2b2b2b;--green:#86c6aa;--amber:#dfb679;--red:#f6a1ae;--focus:#9ebfec}}
+*{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;background:var(--bg);color:var(--ink)}main{max-width:650px;padding:24px;margin:auto}h1,h2,p{margin:0}h1{font-size:17px;font-weight:600}h2{font-size:12px;font-weight:500;color:var(--muted)}button,input,textarea,select{font:inherit;color:inherit}button,summary,a{touch-action:manipulation}button{cursor:pointer}button:disabled{opacity:.45;cursor:default}:focus-visible{outline:2px solid var(--focus);outline-offset:3px}header{display:flex;gap:8px;align-items:center}.slash{font-size:22px;color:var(--muted)}.preview{font-size:10px;color:var(--muted)}.listening{margin-left:auto;display:flex;align-items:center;gap:9px}.switch{width:34px;height:20px;border:0;border-radius:12px;background:#b1b1b1;padding:3px}.switch::before{content:'';display:block;width:14px;height:14px;background:white;border-radius:50%;transition:transform .12s}.switch[aria-checked=true]{background:var(--green)}.switch[aria-checked=true]::before{transform:translateX(14px)}.control-row{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:11px;margin-top:12px}.control-row .next{margin-left:auto;font-variant-numeric:tabular-nums}select,input,textarea{background:var(--bg);border:1px solid var(--line);border-radius:4px;padding:5px 7px}select{font-size:11px}.health{margin:22px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:14px 0}.health-head{display:flex;align-items:center;gap:8px}.health-title{font-weight:600}.health-state{margin-left:auto;font-size:12px}.dot{display:inline-block;width:6px;height:6px;background:var(--muted);border-radius:50%;margin-right:5px}.good{color:var(--green)}.bad{color:var(--amber)}.good .dot{background:var(--green)}.bad .dot{background:var(--amber)}.steps{display:flex;gap:22px;color:var(--muted);font-size:11px;margin-top:10px}.health-note{color:var(--amber);font-size:12px;margin-top:8px}.section-head{display:flex;align-items:center;gap:6px;margin-bottom:8px}.count{color:var(--muted);font-size:11px}.routes{padding:0;margin:0;list-style:none;border-top:1px solid var(--line)}.route{border-bottom:1px solid var(--line);padding:12px 0}.route-head{display:flex;align-items:center;gap:10px}.prefix{font:500 13px ui-monospace,Menlo,monospace;background:transparent;border:0;padding:4px 0}.prefix:hover{text-decoration:underline}.destination{color:var(--muted);font-size:12px;overflow-wrap:anywhere;min-width:0}.route-evidence{margin-left:auto;font-size:10px;color:var(--muted)}.text-button{background:transparent;border:0;padding:3px 0;color:var(--muted);font-size:11px}.text-button:hover:enabled{color:var(--ink)}.context{font-size:10px;color:var(--muted);margin-top:5px}.route-form{margin-top:13px;display:grid;gap:9px}.route-form label{font-size:11px;color:var(--muted);display:grid;gap:4px}.route-form textarea{min-height:64px;resize:vertical;width:100%;font:11px/1.6 ui-monospace,Menlo,monospace}.form-actions{display:flex;align-items:center;gap:8px}.button{background:transparent;border:1px solid var(--line);border-radius:4px;padding:5px 10px;min-height:30px;font-size:12px}.button:hover:enabled{background:var(--hover);border-color:var(--muted)}.form-error,#error{color:var(--red);font-size:12px}.empty{color:var(--muted);padding:16px 0}.advanced{margin-top:18px;color:var(--muted);font-size:11px}summary{cursor:pointer}.raw{overflow:auto;max-height:220px;border:1px solid var(--line);padding:12px;font:11px/1.6 ui-monospace,Menlo,monospace;white-space:pre}footer{display:flex;align-items:center;gap:10px;margin-top:16px}.feedback{font-size:11px;color:var(--muted)}.footnote{font-size:10px;color:var(--muted);margin-top:8px}.skip{position:fixed;top:-60px;padding:8px;background:var(--bg)}.skip:focus{top:4px}.check{margin-left:auto}.form-error:empty,#error:empty{display:none}@media(max-width:420px){main{padding:18px}.steps{gap:12px}.route-head{flex-wrap:wrap}.route-evidence{margin-left:auto}}@media(prefers-reduced-motion:reduce){.switch::before{transition:none}}
+</style>
 </head>
 <body>
-  <main>
-    <p id="error" class="error" role="alert"></p>
-    <!-- Read-only runtime status; intentionally not a live region so the
-         one-second refresh stays quiet for screen readers. -->
-    <p id="runtime-status" class="runtime-status">
-      <span id="runtime-dot" aria-hidden="true"></span>
-      <span id="runtime-text">Checking the poller…</span>
-    </p>
-    <p id="account-line" hidden></p>
-
-    <section class="config" aria-labelledby="config-title">
-      <label id="config-title">config.json</label>
-      <pre id="config-text" tabindex="0" aria-label="Configuration file contents"></pre>
-    </section>
-
-    <footer>
-      <div class="footer-group">
-        <button id="edit-config" type="button">Edit Config</button>
-        <button id="open-log" type="button" disabled>Open Log</button>
-        <span id="log-error" class="error" role="alert"></span>
-      </div>
-      <span id="agent-hint">An agent can manage this configuration too — just point it at the slashie CLI.</span>
-    </footer>
-  </main>
-
-  <script>
-    // `__TAURI__` requires `withGlobalTauri`; the internals bridge is always
-    // injected, so Settings still works if the global API is unavailable.
-    const invoke =
-      window.__TAURI__?.core?.invoke?.bind(window.__TAURI__.core) ??
-      window.__TAURI_INTERNALS__?.invoke?.bind(window.__TAURI_INTERNALS__);
-    const error = document.getElementById("error");
-    const runtimeDot = document.getElementById("runtime-dot");
-    const runtimeText = document.getElementById("runtime-text");
-    const configText = document.getElementById("config-text");
-    const accountLine = document.getElementById("account-line");
-    const openLog = document.getElementById("open-log");
-    const editConfig = document.getElementById("edit-config");
-    const logError = document.getElementById("log-error");
-
-    function renderRuntimeStatus(runtime) {
-      if (runtime.status_text) {
-        runtimeDot.classList.remove("on", "scanning");
-        runtimeText.textContent = runtime.status_text;
-      } else if (!runtime.polling) {
-        runtimeDot.classList.remove("on", "scanning");
-        runtimeText.textContent = "Paused";
-      } else if (runtime.scanning) {
-        runtimeDot.classList.add("on", "scanning");
-        runtimeText.textContent = "Scanning…";
-      } else if (runtime.next_scan_in_secs != null) {
-        runtimeDot.classList.add("on");
-        runtimeDot.classList.remove("scanning");
-        runtimeText.textContent = `Next scan in ${Math.max(1, runtime.next_scan_in_secs)}s`;
-      } else {
-        runtimeDot.classList.add("on");
-        runtimeDot.classList.remove("scanning");
-        runtimeText.textContent = "Scanning…";
-      }
-    }
-
-    function renderSettings(settings) {
-      openLog.disabled = !settings.log_available;
-      accountLine.hidden = !settings.identity;
-      accountLine.textContent = settings.identity
-        ? `Account ${settings.identity} · ${settings.identity_status}`
-        : "";
-      // The mirror shows the file as it is, valid or not; the banner only
-      // explains why the runtime is ignoring it.
-      configText.textContent = settings.config_text || "(empty)";
-      const banner = settings.config_unparsable
-        ? "config.json cannot be parsed. Fix the file and this mirror reloads by itself."
-        : "";
-      // Touch the alert only on change so screen readers are not
-      // re-announced every second.
-      if (error.textContent !== banner) error.textContent = banner;
-    }
-
-    let failureReported = false;
-
-    function reportFailureOnce(message) {
-      // The window has no console; report a broken connection to the log
-      // once per failure episode so it is observable (menu-bar.md).
-      if (failureReported) return;
-      failureReported = true;
-      try {
-        Promise.resolve(invoke?.("report_settings", { message })).catch(() => {});
-      } catch {
-        // Nothing more we can do without the bridge.
-      }
-    }
-
-    async function refresh() {
-      if (document.hidden || typeof invoke !== "function") return;
-      try {
-        const [runtime, settings] = await Promise.all([
-          invoke("get_status"),
-          invoke("get_settings"),
-        ]);
-        failureReported = false;
-        renderRuntimeStatus(runtime);
-        renderSettings(settings);
-      } catch (failure) {
-        runtimeDot.classList.remove("on", "scanning");
-        const message = `Status unavailable. ${failure.message ?? failure}`;
-        runtimeText.textContent = message;
-        reportFailureOnce(message);
-      }
-    }
-    setInterval(refresh, 1000);
-    refresh();
-
-    openLog.onclick = async () => {
-      logError.textContent = "";
-      try {
-        await invoke("open_log");
-      } catch (failure) {
-        logError.textContent = `Could not open the log. ${failure.message ?? failure}`;
-      }
-    };
-
-    editConfig.onclick = async () => {
-      logError.textContent = "";
-      try {
-        await invoke("edit_config");
-      } catch (failure) {
-        logError.textContent = `Could not open an editor. ${failure.message ?? failure}`;
-      }
-    };
-  </script>
+<a class="skip" href="#commands">Handoffs</a>
+<main>
+<header><span class="slash" aria-hidden="true">/</span><h1 translate="no">Slashie</h1><span id="preview" class="preview" hidden>Preview</span><div class="listening"><span id="listening-label">Stopped</span><button id="listen" class="switch" role="switch" aria-label="Listen for commands" aria-checked="false" disabled></button></div></header>
+<div class="control-row"><label for="interval">Check every</label><select id="interval" name="poll_interval" disabled><option value="10">10s</option><option value="20">20s</option><option value="30">30s</option><option value="60">60s</option></select><span id="next-scan" class="next"></span></div>
+<section class="health" aria-label="Channel availability"><div class="health-head"><span class="health-title">Feishu</span><span id="availability" class="health-state" role="status">Not checked</span><button id="check" class="text-button" type="button" disabled aria-label="Refresh connection status">↻</button></div><div class="steps" hidden><span id="receive">Receive —</span><span id="reply">Reply —</span><span id="work">Work —</span></div><p id="health-note" class="health-note" hidden></p></section>
+<p id="error" role="alert"></p>
+<details id="configuration" class="advanced"><summary>Configuration</summary><section id="commands" aria-labelledby="commands-title"><div class="section-head"><h2 id="commands-title">Handoffs</h2><span id="route-count" class="count"></span></div><ul id="routes" class="routes"></ul></section></details>
+<details id="advanced" class="advanced"><summary>Advanced</summary><p class="footnote">Current input: request + source message link. The target reads context through its own authorized tools.</p><pre id="raw" class="raw" tabindex="0" aria-label="Configuration file contents"></pre><button id="edit-config" class="button" type="button" disabled>Edit file</button></details>
+<footer><button id="log" class="text-button" type="button" disabled>Log</button><span id="feedback" class="feedback" role="status" aria-live="polite"></span></footer>
+</main>
+<script>
+const nativeInvoke=window.__TAURI__?.core?.invoke?.bind(window.__TAURI__.core)??window.__TAURI_INTERNALS__?.invoke?.bind(window.__TAURI_INTERNALS__);
+const preview=new URLSearchParams(location.search).get('preview');const el=id=>document.getElementById(id);
+let savedText='',config=null,runtime=null,online=false,refreshing=false,lastCheck=0,feedbackTimer;const pending=new Set();
+const example={poll_interval:20,routes:[{prefix:'/doubao',cmd:'python3 scripts/doubao_session.py',session:'chat',timeout:90},{prefix:'/review',cmd:'./review.sh "$SLASHIE_PROMPT"',timeout:30}],default_prompts:{'/doubao':'Summarize the request, then continue the work.'}};
+let previewRuntime={polling:true,can_toggle:true,receive_status:'verified',reply_status:'blocked',last_scan_ms:Date.now(),next_scan_in_secs:12,pending_jobs:0,status_text:null};
+async function invoke(name,args){if(!preview)return nativeInvoke(name,args);if(name==='get_status')return previewRuntime;if(name==='get_settings')return{config_text:JSON.stringify(example,null,2),log_available:true};if(name==='set_polling'){previewRuntime.polling=args.on;return args.on;}if(name==='save_settings'){const next=JSON.parse(args.text);Object.keys(example).forEach(k=>delete example[k]);Object.assign(example,next);return;}if(name==='check_connection')return;}
+const available=!!preview||typeof nativeInvoke==='function';
+function notify(text,bad=false){clearTimeout(feedbackTimer);el('feedback').textContent=text;el('feedback').style.color=bad?'var(--red)':'';if(!bad)feedbackTimer=setTimeout(()=>el('feedback').textContent='',2500);}
+function healthLabel(value){return{verified:'OK',blocked:'No permission',failed:'Failed',retrying:'Retrying',unknown:'Not checked'}[value]||'Not checked';}
+function renderRuntime(value){runtime=value;el('interval').disabled=!available||!config||pending.has('interval');el('listen').setAttribute('aria-checked',String(value.polling));el('listen').disabled=!available||!value.can_toggle||pending.has('listen');el('listening-label').textContent=value.polling?'Listening':'Stopped';el('next-scan').textContent=value.polling?(value.scanning?'Checking…':value.next_scan_in_secs!=null?`Next ${value.next_scan_in_secs}s`:'Waiting…'):'No polling';el('receive').textContent=`Receive ${healthLabel(value.receive_status)}`;el('reply').textContent=`Reply ${healthLabel(value.reply_status)}`;el('work').textContent=value.pending_jobs?`Work ${value.pending_jobs} pending`:value.work_status==='source_unavailable'?'Source unavailable':value.work_status==='timeout'?'Work timed out':'Work idle';
+let label='Not checked',kind='',note='';if(value.reply_status==='agent'){label=value.receive_status==='verified'?(value.polling?'Ready':'Stopped'):value.receive_status==='blocked'?'Unavailable':value.receive_status==='retrying'?'Retrying':'Not checked';kind=value.receive_status==='verified'?'good':'';}else if(value.reply_status==='blocked'){label='Cannot reply';kind='bad';note='Missing reply access. Reading may still work.';}else if(value.reply_status==='failed'){label='Reply failed';kind='bad';note='Check the log for the failed reply.';}else if(value.receive_status==='blocked'){label='Unavailable';kind='bad';note='Check sign-in or permissions.';}else if(value.receive_status==='retrying'){label='Temporarily unavailable';kind='bad';note='Waiting to retry.';}else if(value.receive_status==='verified'&&value.reply_status==='verified'){label='Last round trip passed';kind='good';}else{note='Reply and target need a successful handoff.';}
+if(savedText&&!config){label='Unavailable';kind='bad';note='Invalid configuration. Open Advanced to repair.';}if(value.work_status==='source_unavailable'){label='Source unavailable';kind='bad';note='Could not resolve the source message link.';}if(value.work_status==='timeout'){label='Task timed out';kind='bad';note='Check the log.';}if(value.work_status==='failed'){label='Task failed';kind='bad';note='Check the log.';}if(value.status_text){note=value.status_text;}el('availability').title=note;el('availability').className=`health-state ${kind}`;el('availability').textContent=label;el('health-note').textContent=note;el('health-note').hidden=true;el('check').disabled=!available||pending.has('check')||Date.now()-lastCheck<60000;}
+function node(tag,cls,text){const n=document.createElement(tag);n.className=cls;if(text!=null)n.textContent=text;return n;}
+function targetName(route){if(route.cmd.includes('doubao_session.py'))return'Doubao';if(/\bclaude\b/.test(route.cmd))return'Claude';if(/\bcodex\b/.test(route.cmd))return'Codex';return'Local script';}
+function renderSettings(settings){el('log').disabled=!available||!settings.log_available;el('edit-config').disabled=!available;const text=settings.config_text||'';if(text===savedText)return;if(el('routes').querySelector('form:not([hidden])')){el('error').textContent='Configuration changed. Cancel to reload; your draft is kept.';return;}savedText=text;el('raw').textContent=text;try{config=JSON.parse(text);if(!Array.isArray(config.routes))throw Error('Missing routes');el('error').textContent='';}catch{config=null;el('error').textContent='Invalid configuration. Open Advanced to repair.';}
+el('interval').disabled=!available||!config||pending.has('interval');if(config)el('interval').value=String(config.poll_interval);el('route-count').textContent=String(config?.routes.length||0);const list=document.createDocumentFragment();for(const route of config?.routes||[]){const item=node('li','route'),head=node('div','route-head'),copy=node('button','prefix',route.prefix);copy.type='button';copy.title='Copy command';copy.setAttribute('aria-label',`Copy ${route.prefix}`);copy.onclick=async()=>{try{await navigator.clipboard.writeText(route.prefix);notify('Copied');}catch{notify('Copy failed',true);}};head.append(copy,node('span','destination',`→ ${targetName(route)}`));const edit=node('button','text-button','Configure');edit.type='button';edit.setAttribute('aria-label',`Configure ${route.prefix}`);const form=node('form','route-form');form.hidden=true;const makeField=(label,name,text)=>{const wrap=node('label','',label),field=node('textarea','');field.name=name;field.value=text;field.spellcheck=false;wrap.append(field);form.append(wrap);return field;};const command=makeField('Script','cmd',route.cmd),prompt=makeField('Default prompt','default_prompt',config.default_prompts?.[route.prefix]||'');const row=node('div','form-actions'),save=node('button','button','Save'),cancel=node('button','text-button','Cancel'),error=node('p','form-error');save.type='submit';cancel.type='button';error.setAttribute('role','alert');row.append(save,cancel);form.append(row,error);edit.onclick=()=>{form.hidden=!form.hidden;if(!form.hidden)command.focus();};cancel.onclick=()=>{form.hidden=true;savedText='';refresh();};form.onsubmit=async(event)=>{event.preventDefault();if(!online){error.textContent='App offline.';return;}if(!command.value.trim()){error.textContent='Script cannot be empty.';command.focus();return;}save.disabled=true;error.textContent='';const next=JSON.parse(savedText);next.routes.find(r=>r.prefix===route.prefix).cmd=command.value;next.default_prompts??={};if(prompt.value.trim())next.default_prompts[route.prefix]=prompt.value;else delete next.default_prompts[route.prefix];try{await invoke('save_settings',{expected:savedText,text:JSON.stringify(next,null,2)});notify('Saved');form.hidden=true;await refresh();}catch(failure){error.textContent=String(failure.message??failure);save.disabled=false;}};head.append(edit);item.append(head,node('p','context',route.session==='chat'?'Message link included · Same chat / topic continues':'Message link included · One-off'),form);list.append(item);}if(!config?.routes.length)list.append(node('li','empty','No handoffs configured'));el('routes').replaceChildren(list);}
+async function refresh(){if(!available||refreshing||document.hidden)return;refreshing=true;try{const [r,s]=await Promise.all([invoke('get_status'),invoke('get_settings')]);online=true;renderSettings(s);renderRuntime(r);}catch{online=false;el('availability').textContent='App offline';el('availability').className='health-state bad';el('listening-label').textContent='Unknown';el('next-scan').textContent='No connection';for(const id of ['listen','check','interval','edit-config','log'])el(id).disabled=true;el('health-note').textContent='Restart Slashie.';el('health-note').hidden=true;}finally{refreshing=false;}}
+el('listen').onclick=async()=>{if(pending.has('listen')||!runtime)return;pending.add('listen');el('listen').disabled=true;try{await invoke('set_polling',{on:!runtime.polling});await refresh();}catch(failure){notify(String(failure.message??failure),true);}finally{pending.delete('listen');await refresh();}};
+el('interval').onchange=async()=>{pending.add('interval');el('interval').disabled=true;const next=JSON.parse(savedText);next.poll_interval=Number(el('interval').value);try{await invoke('save_settings',{expected:savedText,text:JSON.stringify(next,null,2)});notify('Saved');}catch(failure){notify(String(failure.message??failure),true);}finally{pending.delete('interval');savedText='';await refresh();}};
+el('check').onclick=async()=>{if(pending.has('check'))return;pending.add('check');lastCheck=Date.now();el('check').textContent='Checking…';el('check').disabled=true;try{await invoke('check_connection');notify('Refreshed');}catch(failure){notify(String(failure.message??failure),true);}finally{pending.delete('check');el('check').textContent='↻';await refresh();}};
+for(const [id,name]of[['log','open_log'],['edit-config','edit_config']])el(id).onclick=async()=>{try{await invoke(name);notify('Opened');}catch(failure){notify(String(failure.message??failure),true);}};
+if(preview){el('preview').hidden=false;if(preview==='stopped')previewRuntime.polling=false;if(preview==='available')previewRuntime.reply_status='verified';if(preview==='unknown')previewRuntime={...previewRuntime,receive_status:'unknown',reply_status:'unknown'};}
+refresh();setInterval(refresh,1000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
+</script>
 </body>
 </html>

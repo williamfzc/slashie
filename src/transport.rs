@@ -90,6 +90,25 @@ pub trait Channel: Send + Sync {
     /// Stable channel id stored with sessions, e.g. "feishu".
     fn id(&self) -> &'static str;
 
+    /// Cached startup permission evidence. None means not verified, not usable.
+    #[cfg_attr(not(feature = "tray"), allow(dead_code))]
+    fn can_reply(&self) -> Option<bool> {
+        None
+    }
+
+    /// Explicit user-requested, read-only connection check; never sends messages.
+    #[cfg_attr(not(feature = "tray"), allow(dead_code))]
+    fn check_connection(&self) -> Result<(), TransportError> {
+        Err(TransportError::Incomplete(
+            "Connection check is unavailable".into(),
+        ))
+    }
+
+    /// Resolve the source navigation link only for an accepted handoff.
+    fn message_link(&self, message: &Message) -> Result<Option<String>, TransportError> {
+        Ok(message.link.clone())
+    }
+
     /// Conversation identity for a message. Chat is the default scope; a
     /// topic/thread gets its own key. Channels with a different identity
     /// model override this.
@@ -113,8 +132,17 @@ pub trait Channel: Send + Sync {
     /// Fetch details for the given IDs. Missing IDs mean an incomplete result.
     fn mget(&self, ids: &[String]) -> Result<Vec<Message>, TransportError>;
 
-    /// One best-effort processing reaction targeting the claimed message.
-    fn react_processing(&self, source_id: &str) -> Result<(), TransportError>;
+    /// Software acknowledgment after durable acceptance, before queue delivery.
+    /// Return only a confirmed reaction ID, so only our own status is removed.
+    fn react_processing(&self, source_id: &str) -> Result<Option<String>, TransportError>;
+
+    /// Software terminal state, independent of the target's text reply decision.
+    fn react_finished(
+        &self,
+        source_id: &str,
+        succeeded: bool,
+        processing_id: Option<&str>,
+    ) -> Result<(), TransportError>;
 
     /// One reply attempt targeting the source message. `in_thread` keeps the
     /// reply in the source topic/thread. Returns the reply ID on success.
@@ -172,6 +200,8 @@ pub struct MockBehavior {
     pub mget_missing_ids: Vec<String>,
     #[serde(default)]
     pub reaction_rejected: bool,
+    #[serde(default)]
+    pub source_link_unavailable: bool,
     /// Make every reply fail definitively.
     #[serde(default)]
     pub reply_rejected: bool,
@@ -184,7 +214,10 @@ pub struct MockTransport {
     fixture: MockFixture,
     search_failures_left: std::sync::atomic::AtomicU32,
     pub reaction_attempts: std::sync::Mutex<Vec<String>>,
+    pub terminal_reactions: std::sync::Mutex<Vec<(String, bool, Option<String>)>>,
     pub replies: std::sync::Mutex<Vec<ReplyRecord>>,
+    #[cfg(test)]
+    pub terminal_failures_left: std::sync::Mutex<u32>,
     next_reply_id: std::sync::atomic::AtomicU32,
 }
 
@@ -195,7 +228,10 @@ impl MockTransport {
             fixture,
             search_failures_left: std::sync::atomic::AtomicU32::new(left),
             reaction_attempts: std::sync::Mutex::new(Vec::new()),
+            terminal_reactions: std::sync::Mutex::new(Vec::new()),
             replies: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            terminal_failures_left: std::sync::Mutex::new(0),
             next_reply_id: std::sync::atomic::AtomicU32::new(1),
         }
     }
@@ -217,6 +253,15 @@ impl MockTransport {
 }
 
 impl Channel for MockTransport {
+    fn message_link(&self, message: &Message) -> Result<Option<String>, TransportError> {
+        if self.fixture.behavior.source_link_unavailable {
+            return Err(TransportError::Incomplete(
+                "Source message link unavailable".into(),
+            ));
+        }
+        Ok(message.link.clone())
+    }
+
     fn id(&self) -> &'static str {
         "feishu"
     }
@@ -271,11 +316,38 @@ impl Channel for MockTransport {
         Ok(out)
     }
 
-    fn react_processing(&self, source_id: &str) -> Result<(), TransportError> {
+    fn react_processing(&self, source_id: &str) -> Result<Option<String>, TransportError> {
         self.reaction_attempts
             .lock()
             .unwrap()
             .push(source_id.into());
+        if self.fixture.behavior.reaction_rejected {
+            return Err(TransportError::Fatal("mock reaction rejection".into()));
+        }
+        Ok(Some(format!("reaction-{}", source_id)))
+    }
+
+    fn react_finished(
+        &self,
+        source_id: &str,
+        succeeded: bool,
+        processing_id: Option<&str>,
+    ) -> Result<(), TransportError> {
+        self.terminal_reactions.lock().unwrap().push((
+            source_id.into(),
+            succeeded,
+            processing_id.map(str::to_string),
+        ));
+        #[cfg(test)]
+        {
+            let mut remaining = self.terminal_failures_left.lock().unwrap();
+            if *remaining > 0 {
+                *remaining -= 1;
+                return Err(TransportError::Transient(
+                    "injected terminal failure".into(),
+                ));
+            }
+        }
         if self.fixture.behavior.reaction_rejected {
             return Err(TransportError::Fatal("mock reaction rejection".into()));
         }
@@ -325,7 +397,16 @@ impl Channel for UnconfiguredChannel {
         Err(TransportError::Fatal("slashie is not configured".into()))
     }
 
-    fn react_processing(&self, _source_id: &str) -> Result<(), TransportError> {
+    fn react_processing(&self, _source_id: &str) -> Result<Option<String>, TransportError> {
+        Err(TransportError::Fatal("slashie is not configured".into()))
+    }
+
+    fn react_finished(
+        &self,
+        _source_id: &str,
+        _succeeded: bool,
+        _processing_id: Option<&str>,
+    ) -> Result<(), TransportError> {
         Err(TransportError::Fatal("slashie is not configured".into()))
     }
 

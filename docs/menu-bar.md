@@ -49,16 +49,17 @@ A confirmed later reply clears the reply status. The log retains operational det
 
 ## Settings
 
-The window is a mirror of `config.json`, shown verbatim — not an editor. Edits happen in the file itself or through the [slashie CLI](DESIGN.md#configuration-and-files), so the window, an agent, and a terminal all see and change the same artifact. The polling switch stays in the menu. [Apple settings guidance](https://developer.apple.com/design/human-interface-guidelines/settings#macOS)
+The window answers two primary questions: is listening enabled, and which part of the handoff can currently be trusted? A source message link is passed to the configured AI or script; that target reads context through its own authorized tools. Configuration is secondary. [Apple settings guidance](https://developer.apple.com/design/human-interface-guidelines/settings#macOS)
 
 | Area | Content |
 | --- | --- |
-| Runtime status | A read-only line with a small dot. It mirrors the [menu status](#status-item-and-menu): paused, the copy of any fault or retry, `Scanning…` while a scan runs, or a countdown to the next scan. It is not a live region, so screen readers read it on focus instead of announcing every refresh. Motion respects the system reduced-motion setting. |
-| Account | One muted line: the Feishu identity verified at startup and how its binding stands — `connected`, or `unavailable` while intake is blocked. Hidden when no identity was verified. |
-| Configuration | The raw `config.json`, verbatim, in a selectable monospace block under a small `config.json` label. |
-| Footer | `Edit Config` and `Open Log` on the left, and one sentence on the right: an agent can manage this configuration too, pointed at the slashie CLI. Disable `Open Log` when the log is unavailable. |
+| Listening | A saved Listening/Stopped switch in the window, synchronized with the menu. The adjacent 10/20/30/60-second interval and next-query countdown show polling cost. Off means no new queries. |
+| Channel availability | One compact status and a refresh icon. Default agent-owned delivery does not treat missing send scope as unavailable; explicit auto mode shows missing reply scope. Receiving/reply evidence and failure details remain local runtime data and can be inspected in the log, not persistent explanatory rows. Recent scan evidence expires after two minutes; prior success is not current all-chat or target readiness. |
+| Handoffs | Hidden under Configuration by default. Expand to see exact prefix → configured target and edit a program/default prompt. |
+| Per-handoff configuration | Expand Configure to edit Script and Default prompt. Save validates the full file and rejects stale edits; Cancel discards only the draft. No automatic test execution of a user's script. |
+| Advanced and log | Raw config and external editor under Advanced; operational Log is secondary. |
 
-`Edit Config` opens `config.json` in the system's default text editor, like `Open Log` opens the log. The mirror refreshes about once a second while the window is visible, so file and CLI edits appear without reopening the window. When the configuration cannot be parsed, the mirror still shows the file verbatim with an explanation, and recovers by itself once the file is valid. Closing the window never loses anything: there is nothing to save.
+The mirror refreshes once per second from local state, without a new remote permission query each tick. The refresh icon runs a bounded, read-only identity/permission check no more than once a minute and never sends a message. External config edits appear without reopening; an open draft is retained rather than silently overwritten. Invalid files remain available for repair. App disconnection disables controls and must not leave a green availability signal.
 
 ## Acceptance
 
@@ -67,6 +68,6 @@ The window is a mirror of `config.json`, shown verbatim — not an editor. Edits
 - Verify the dimmed glyph completely still while polling is off, and the whole glyph breathing smoothly while it is on: a one-second cycle between scans, double speed during a scan, full brightness held briefly after a scan completes (including an empty one) and then resumed without a snap. Verify the plain glyph during scan failure, retry, and shutdown, and confirm the icon and neighboring items stay in place throughout. The motion must match the switch: nothing animates while polling is off, and state changes morph rather than snap.
 - Verify the frames read at a glance in light and dark appearances and that the breath is visible without relying on color alone.
 - Turn polling off during a command and verify the [pause behavior](product.md#pause-and-recovery). Exercise backoff, failed setting writes, and an uncertain reply. Confirm normal states use the checkmark alone.
-- Open Settings while polling and verify the runtime status line counts down to the next scan, switches to `Scanning…` while a scan runs, and shows `Paused` when polling is off. Verify it carries the status-line copy during a fault, the account line names the verified identity and its binding status, and the dot does not animate when reduced motion is set.
-- Open Settings and verify the mirror shows `config.json` verbatim. Run `slashie route add` in a terminal and confirm the new route appears within a couple of seconds without reopening the window. Use `Edit Config`, change a value, save the file, and confirm the mirror and the next scan pick it up; introduce a syntax error and confirm the mirror still shows the file with the explanation, then repair it and confirm recovery. Confirm that the log opens from Settings.
+- Open Settings while polling and verify Listening/Stopped, next-query countdown, and separate receiving/reply/work evidence. A connected account in agent mode must not become unavailable merely because it lacks send scope. Explicit auto mode remains Cannot reply when send scope is absent. Verify retry, configuration, local state and sign-in guidance plus reduced-motion behavior.
+- Copy the exact prefix; edit and save a program/default prompt, then reopen to verify persistence. Invalid and stale writes must not overwrite the file, and external changes must not destroy an open draft. Verify raw config under Advanced and recovery after invalid config or app disconnection. Buttons never send duplicate pending actions.
 - Quit during a command and verify cleanup before another instance can start. Launch from Finder while headless holds the lock and verify the startup alert.

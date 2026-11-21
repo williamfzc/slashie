@@ -42,6 +42,7 @@ pub struct LarkCliTransport {
     self_id: std::sync::Mutex<Option<String>>,
     /// Default CLI call deadline; tests shorten it.
     timeout_ms: u64,
+    reply_permission: std::sync::Mutex<Option<bool>>,
 }
 
 impl LarkCliTransport {
@@ -72,6 +73,7 @@ impl LarkCliTransport {
             shutdown,
             self_id: std::sync::Mutex::new(None),
             timeout_ms: CALL_TIMEOUT_MS,
+            reply_permission: std::sync::Mutex::new(None),
         }
     }
 
@@ -201,6 +203,37 @@ impl LarkCliTransport {
         Ok(stdout_text)
     }
 
+    /// Return a confirmed status ID; do not infer success from a clean exit.
+    fn create_reaction(&self, source_id: &str, emoji: &str) -> Result<String, TransportError> {
+        let params = json!({"message_id": source_id});
+        let body = json!({"reaction_type": {"emoji_type": emoji}});
+        let envelope = self
+            .run_json(
+                &[
+                    "im",
+                    "reactions",
+                    "create",
+                    "--as",
+                    "user",
+                    "--params",
+                    &params.to_string(),
+                    "--data",
+                    "-",
+                ],
+                Some(&body.to_string()),
+                REACTION_TIMEOUT_MS,
+            )
+            .map_err(cli_failure_to_transport)?;
+        api_data(&envelope)?
+            .get("reaction_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                TransportError::Incomplete("Reaction response has no confirmed ID".into())
+            })
+    }
+
     fn kill_group(&self, pgid: i32) {
         unsafe {
             libc::kill(-pgid, libc::SIGTERM);
@@ -235,6 +268,7 @@ impl LarkCliTransport {
         let status = self
             .run_json(&["auth", "status", "--json"], None, self.timeout_ms)
             .map_err(cli_failure_to_transport)?;
+        *self.reply_permission.lock().unwrap() = reply_scope(&status);
         let user_ready = status
             .pointer("/identities/user/status")
             .and_then(|v| v.as_str())
@@ -261,6 +295,34 @@ impl LarkCliTransport {
 
 /// The open_id from a `+get-user` payload: live-verified 1.0.68 nests it
 /// under `user`; a flat `open_id` stays accepted for compatibility.
+fn reply_scope(status: &Value) -> Option<bool> {
+    status
+        .pointer("/identities/user/scope")
+        .and_then(Value::as_str)
+        .map(|scope| {
+            scope
+                .split_whitespace()
+                .any(|s| s == "im:message.send_as_user")
+        })
+}
+
+#[cfg(test)]
+#[test]
+fn permission_evidence_is_not_inferred_from_login() {
+    assert_eq!(
+        reply_scope(&json!({"identities":{"user":{"status":"ready"}}})),
+        None
+    );
+    assert_eq!(
+        reply_scope(&json!({"identities":{"user":{"scope":"im:message:readonly"}}})),
+        Some(false)
+    );
+    assert_eq!(
+        reply_scope(&json!({"identities":{"user":{"scope":"im:message.send_as_user im:message"}}})),
+        Some(true)
+    );
+}
+
 fn extract_open_id(data: &Value) -> Option<&str> {
     data.get("open_id")
         .and_then(|v| v.as_str())
@@ -443,13 +505,71 @@ fn parse_item(item: &Value) -> Result<Message, String> {
             .get("recalled")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        link: None, // verified message links are pinned during live acceptance
+        link: item
+            .get("message_app_link")
+            .and_then(Value::as_str)
+            .filter(|link| !link.is_empty())
+            .map(str::to_string),
     })
 }
 
 impl Channel for LarkCliTransport {
     fn id(&self) -> &'static str {
         "feishu"
+    }
+
+    fn can_reply(&self) -> Option<bool> {
+        *self.reply_permission.lock().unwrap()
+    }
+
+    fn check_connection(&self) -> Result<(), TransportError> {
+        let expected = self.self_id.lock().unwrap().clone();
+        let actual = self.verify_identity()?;
+        if expected.as_deref() == Some(&actual) {
+            Ok(())
+        } else {
+            Err(TransportError::Fatal(
+                "Identity changed; restart with the expected account".into(),
+            ))
+        }
+    }
+
+    fn message_link(&self, message: &Message) -> Result<Option<String>, TransportError> {
+        if let Some(link) = &message.link {
+            return Ok(Some(link.clone()));
+        }
+        let envelope = self
+            .run_json(
+                &[
+                    "im",
+                    "+messages-mget",
+                    "--message-ids",
+                    &message.id,
+                    "--no-reactions",
+                    "--format",
+                    "json",
+                ],
+                None,
+                self.timeout_ms,
+            )
+            .map_err(cli_failure_to_transport)?;
+        let data = api_data(&envelope)?;
+        let link = data
+            .get("messages")
+            .and_then(Value::as_array)
+            .and_then(|messages| {
+                messages
+                    .iter()
+                    .find(|m| m.get("message_id").and_then(Value::as_str) == Some(&message.id))
+            })
+            .and_then(|m| m.get("message_app_link"))
+            .and_then(Value::as_str)
+            .filter(|link| !link.is_empty());
+        link.map(|link| Some(link.to_string())).ok_or_else(|| {
+            TransportError::Incomplete(
+                "Source message link is unavailable; handoff was not started".into(),
+            )
+        })
     }
 
     fn workspace_dir(&self, home: &Path, key: &ConversationKey) -> PathBuf {
@@ -591,27 +711,38 @@ impl Channel for LarkCliTransport {
         Ok(out)
     }
 
-    fn react_processing(&self, source_id: &str) -> Result<(), TransportError> {
-        let params = json!({ "message_id": source_id });
-        let body = json!({ "reaction_type": { "emoji_type": "OnIt" } });
-        let envelope = self
-            .run_json(
-                &[
-                    "im",
-                    "reactions",
-                    "create",
-                    "--as",
-                    "user",
-                    "--params",
-                    &params.to_string(),
-                    "--data",
-                    "-",
-                ],
-                Some(&body.to_string()),
-                REACTION_TIMEOUT_MS,
-            )
-            .map_err(cli_failure_to_transport)?;
-        api_data(&envelope).map(|_| ())
+    fn react_processing(&self, source_id: &str) -> Result<Option<String>, TransportError> {
+        self.create_reaction(source_id, "OnIt").map(Some)
+    }
+
+    fn react_finished(
+        &self,
+        source_id: &str,
+        succeeded: bool,
+        processing_id: Option<&str>,
+    ) -> Result<(), TransportError> {
+        // Add the truthful terminal state first; failed writes must keep OnIt.
+        self.create_reaction(source_id, if succeeded { "DONE" } else { "ERROR" })?;
+        if let Some(id) = processing_id {
+            let params = json!({"message_id": source_id, "reaction_id": id});
+            let envelope = self
+                .run_json(
+                    &[
+                        "im",
+                        "reactions",
+                        "delete",
+                        "--as",
+                        "user",
+                        "--params",
+                        &params.to_string(),
+                    ],
+                    None,
+                    REACTION_TIMEOUT_MS,
+                )
+                .map_err(cli_failure_to_transport)?;
+            api_data(&envelope)?;
+        }
+        Ok(())
     }
 
     fn reply(&self, source_id: &str, text: &str, in_thread: bool) -> Result<String, ReplyError> {
@@ -733,6 +864,8 @@ if args[:2] == ["contact", "+get-user"]:
 
 if args[:3] == ["api", "POST", "/open-apis/im/v1/messages/search"]:
     body = stdin_arg("--data")
+    # Every page must restrict search at the server, before details are read.
+    assert body.get("filter", {}).get("from_ids") == ["ou_verified"]
     # Live-verified wire shape: pagination rides in --params, and the body
     # time range uses start_time/end_time with second precision.
     params_arg = args[args.index("--params") + 1] if "--params" in args else "{}"
@@ -778,6 +911,14 @@ if args[:3] == ["api", "POST", "/open-apis/im/v1/messages/search"]:
             "page_token": "p2", "echo": body}}))
     sys.exit(0)
 
+if args[:2] == ["im", "+messages-mget"]:
+    mid = args[args.index("--message-ids") + 1]
+    assert "--no-reactions" in args
+    messages = [] if mid == "om_missing" else [{"message_id": mid,
+        "message_app_link": "https://applink.feishu.cn/client/chat/open?openChatId=oc_chat&position=28"}]
+    print(json.dumps({"ok": True, "data": {"messages": messages}}))
+    sys.exit(0)
+
 if args[:3] == ["api", "GET", "/open-apis/im/v1/messages/mget"]:
     params = stdin_arg("--params")
     if "om_missing" in params["message_ids"]:
@@ -806,12 +947,29 @@ if args[:3] == ["api", "GET", "/open-apis/im/v1/messages/mget"]:
     sys.exit(0)
 
 if args[:3] == ["im", "reactions", "create"]:
-    assert profile == "reaction-test"
+    assert profile in ["reaction-test", "reaction-missing-id", "reaction-terminal-denied", "reaction-delete-denied"]
     assert args[3:6] == ["--as", "user", "--params"]
-    assert json.loads(args[6]) == {"message_id": "om_reaction_source"}
+    params = json.loads(args[6])
+    assert params["message_id"] == "om_reaction_source"
     assert args[7:] == ["--data", "-"]
-    assert stdin_arg("--data") == {"reaction_type": {"emoji_type": "OnIt"}}
-    print(json.dumps({"ok": True, "identity": "user", "data": {"reaction_id": "reaction_test"}}))
+    emoji = stdin_arg("--data")["reaction_type"]["emoji_type"]
+    assert emoji in ["OnIt", "DONE", "ERROR"]
+    if profile == "reaction-missing-id":
+        print(json.dumps({"ok": True, "data": {}})); sys.exit(0)
+    if profile == "reaction-terminal-denied" and emoji != "OnIt":
+        print(json.dumps({"ok": False, "error": {"message": "terminal reaction denied"}})); sys.exit(3)
+    print(json.dumps({"ok": True, "identity": "user", "data": {"reaction_id": "reaction_" + emoji}}))
+    sys.exit(0)
+
+if args[:3] == ["im", "reactions", "delete"]:
+    assert profile in ["reaction-test", "reaction-delete-denied"]
+    assert args[3:6] == ["--as", "user", "--params"]
+    assert json.loads(args[6]) == {"message_id": "om_reaction_source", "reaction_id": "reaction_OnIt"}
+    # A second author's same emoji must not be queried or removed by name.
+    assert "reaction_other_author_OnIt" not in args[6]
+    if profile == "reaction-delete-denied":
+        print(json.dumps({"ok": False, "error": {"message": "delete denied"}})); sys.exit(3)
+    print(json.dumps({"ok": True, "data": {"reaction_id": "reaction_OnIt"}}))
     sys.exit(0)
 
 if args[:1] == ["im"] and "+messages-reply" in args:
@@ -874,6 +1032,27 @@ sys.exit(0)
     }
 
     #[test]
+    fn source_link_is_exact_and_missing_link_blocks_handoff() {
+        let dir = tmp("source-link");
+        let t = transport_in(&dir, "test");
+        let mut msg = t.mget(&["om_source".into()]).unwrap().remove(0);
+        let link = t.message_link(&msg).unwrap().unwrap();
+        assert_eq!(
+            link,
+            "https://applink.feishu.cn/client/chat/open?openChatId=oc_chat&position=28"
+        );
+        msg.link = Some(link.clone());
+        msg.id = "om_missing".into();
+        assert_eq!(t.message_link(&msg).unwrap(), Some(link));
+        msg.link = None;
+        assert!(matches!(
+            t.message_link(&msg),
+            Err(TransportError::Incomplete(_))
+        ));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn identity_ready_and_open_id() {
         let dir = tmp("identity");
         let t = transport_in(&dir, "test");
@@ -885,8 +1064,33 @@ sys.exit(0)
     fn processing_reaction_targets_source_as_user() {
         let dir = tmp("reaction");
         let t = transport_in(&dir, "reaction-test");
-        t.react_processing("om_reaction_source").unwrap();
+        let id = t.react_processing("om_reaction_source").unwrap();
+        assert_eq!(id.as_deref(), Some("reaction_OnIt"));
+        t.react_finished("om_reaction_source", true, id.as_deref())
+            .unwrap();
+        t.react_finished("om_reaction_source", false, None).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reaction_failures_never_invent_ids_or_remove_unconfirmed_status() {
+        for profile in [
+            "reaction-missing-id",
+            "reaction-terminal-denied",
+            "reaction-delete-denied",
+        ] {
+            let dir = tmp(profile);
+            let t = transport_in(&dir, profile);
+            if profile == "reaction-missing-id" {
+                assert!(t.react_processing("om_reaction_source").is_err());
+            } else {
+                let id = t.react_processing("om_reaction_source").unwrap();
+                assert!(t
+                    .react_finished("om_reaction_source", true, id.as_deref())
+                    .is_err());
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]

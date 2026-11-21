@@ -6,24 +6,24 @@ description: Feishu-to-local workflow, release scope, and acceptance criteria.
 
 # Slashie product specification
 
-Send a slash command in Feishu. Slashie finds the message under an existing authorized Lark CLI user identity, runs a configured command on the user's machine, and replies to the original message. The intended setup is one account and one host.
+Send a slash command in Feishu. Slashie finds the message under an existing authorized Lark CLI user identity, hands the request and source message link to a configured local agent or script. The agent decides whether to send through its own authorized tools; completing work without replying is valid. The intended setup is one account and one host.
 
 ## Trigger and reply
 
 1. The operator configures a route and enables polling. A new installation starts paused with [editable starter routes](DESIGN.md#configuration-and-files).
 2. The first whitespace-delimited token of a self-authored, searchable, top-level or topic text message must match a configured prefix exactly. `/pingpong` does not match `/ping`. Multiline arguments keep their internal line breaks.
 3. Direct messages, ordinary groups, and Feishu topics are release targets. A topic root and replies carrying the same topic ID are eligible; an ordinary reply without a topic ID is ignored. Recalled messages, non-text messages, and Slashie's own delivered replies are ignored.
-4. Routes can pass message arguments as one value, with or without source context. Context includes the message ID and an available message or conversation link.
-5. When an accepted request starts processing, Slashie attempts one Feishu `OnIt` reaction on the original message. A reaction failure is logged and processing continues.
-6. Slashie attempts one text reply targeting the original message, in the same topic/thread when the source has one. Success returns stdout, with a short acknowledgment for empty output. Failure or timeout returns the reason and available diagnostics. Long replies include a truncation notice. Slashie discards output beyond the excerpt.
+4. Routes receive the request and exact source message link by default through `SLASHIE_PROMPT`; scripts can also use `SLASHIE_LINK` separately. AI or scripts read the linked conversation/topic with their own authorized tools, then continue the task. Passing a link is not proof that the target has read it. Feishu refuses to start a handoff if it cannot resolve that link. An explicitly arguments-only script can choose `SLASHIE_ARGS`.
+5. Software-owned status is independent of `reply_mode`: after a message is durably accepted (including queued work), Slashie attempts `OnIt` on the original message before launching its target. After successful execution and durable settlement, it adds `DONE`, then removes only its own confirmed `OnIt`. Failed execution, timeout, or an unavailable source gets `ERROR`, never `DONE`. Reaction failure is logged and does not change the work result. Paused, unclaimed, or capacity-deferred messages receive no acknowledgment. Shutdown or a crash can leave a prior status unchanged; do not infer success from it.
+6. Default `reply_mode: agent` performs no automatic text reply. The target decides whether to send text through its own authorized tools; it is not responsible for software status reactions. Missing text-send access or choosing not to reply is not a work failure. Explicit `reply_mode: auto` retains legacy stdout forwarding only; it does not control status reactions.
 
 A conversation is one channel, one chat, and optionally one topic. Direct-message and ordinary-group top-level messages share the chat conversation; a topic root and its replies share a topic conversation, and different topics are isolated. Routes configured with `session: chat` keep one local agent session per conversation. The first successful request starts the session; later requests in the same conversation resume it. A different chat or topic starts a different session. A failed first command does not create the mapping. Continuity depends on the agent's own session store and its resume command. Resetting a conversation is a local operation on its workspace and mapping.
 
-Enabling polling covers supported conversations visible to the authorized account. A group can see the reply. Route commands run with the local user's permissions. An agent may send request data to its provider according to its own configuration.
+Enabling polling covers supported conversations visible to the authorized account. A group can see messages the agent explicitly sends, if authorized. Route commands run with the local user's permissions. An agent may send request data to its provider according to its own configuration.
 
 ## Controls and faults
 
-Use the [macOS menu](menu-bar.md) to toggle polling, open Settings, and quit. Quitting while commands run or wait replies `Canceled: Slashie is shutting down.` for each affected command; queued-but-never-started work is likewise canceled, not silently dropped. Settings edits the polling interval and route commands. Saved edits apply at the next scan without a restart, and the diagnostic log is available from Settings. Headless mode runs the same service in the foreground and logs status. Feishu carries command outcomes. The menu and the local log carry operational faults, including when a reply failed or its delivery is uncertain.
+Use the [macOS menu](menu-bar.md) to toggle polling, open Settings, and quit. Quitting records shutdown for affected requests; the default mode does not send a cancellation message. Explicit auto mode forwards `Canceled: Slashie is shutting down.` when authorized. Settings edits the polling interval and route commands. Saved edits apply at the next scan without a restart, and the diagnostic log is available from Settings. Headless mode runs the same service in the foreground and logs status. Feishu carries command outcomes. The menu and the local log carry operational faults, including when a reply failed or its delivery is uncertain.
 
 ## Pause and recovery
 
@@ -35,7 +35,7 @@ Commands in one conversation run in the order they were sent, one at a time; dif
 
 ## Data flow
 
-Message text travels from Feishu to the local command as environment variables (`SLASHIE_PROMPT`, `SLASHIE_ARGS`) and never leaves the machine except through the command itself. The command's output is the reply text sent back to the original Feishu message. The local log records IDs, durations, and outcomes — not message text or command output.
+Message text travels from Feishu to the local command as environment variables (`SLASHIE_PROMPT`, `SLASHIE_ARGS`) and never leaves the machine except through the command itself. The target owns its output and any sending decision. Only explicit auto mode forwards stdout to Feishu. The local log records IDs, durations, and outcomes — not message text or command output.
 
 ## Delivery and evidence
 
@@ -51,12 +51,12 @@ The `/pi` context reader was part of the test harness. The shipped route interfa
 
 | Case | Pass condition |
 | --- | --- |
-| Send `/ping` in a direct message and ordinary group. | An `OnIt` reaction is attempted when processing starts. One reply references the original message in each released surface. |
-| Send two commands in each of two topics in one chat, then a follow-up in the first topic. Send a command in an ordinary reply thread without a topic. | Each topic has its own session and workspace. The follow-up resumes the first topic. The ordinary reply is ignored. Replies appear in their topic. A message whose text starts with a command but is Slashie's own delivered reply never executes. |
+| Send `/ping` in a direct message and ordinary group. | Slashie adds `OnIt` after durable acceptance, then replaces its own acknowledgment with `DONE` on successful execution. The target receives the exact source link. Agent mode does not force a text reply. |
+| Send two commands in each of two topics in one chat, then a follow-up in the first topic. Send a command in an ordinary reply thread without a topic. | Each topic has its own session and workspace. The follow-up resumes the first topic. The ordinary reply is ignored. The target receives the correct topic source; no reply is required in agent mode. A message whose text starts with a command but is Slashie's own delivered reply never executes. |
 | Exercise both route input forms with multiline text and shell metacharacters. Send a near-prefix, another author's message, and a reply beginning with a command. | The selected input form arrives as one argument. Source context is included when requested. Message text cannot change the shell program, and ineligible messages never execute. |
 | Deliver duplicate and late-indexed results. Kill the process after a claim and during a reply attempt. | Eligible results inside the window run once. Claims survive restart and uncertain attempts appear in the log. Corrupt state blocks new work. |
 | Send more commands than the queues hold: a burst in one conversation, and messages from more conversations than slots. | Each scan admits at most the caps ([design](DESIGN.md#polling-and-claims)); the overflow stays unclaimed and later scans admit it. Nothing claimed is ever left unrun. |
-| Quit while a command runs and while others wait in its conversation. | Every affected message receives `Canceled: Slashie is shutting down.`; none report an ordinary command failure. |
+| Quit while a command runs and while others wait in its conversation. | Affected claims settle as shutdown; agent mode sends nothing. Auto mode, if authorized, forwards cancellation rather than a command failure. |
 | Pause during a command, send messages while paused, resume, and restart. | Accepted work can finish during pause. Earlier messages remain outside every new activation window. |
 | Submit work while a command runs, then time out a command that has ordinary child processes. | Execution stays serial, polling proceeds while queue space remains, and the timed-out process group exits. |
 | Exercise empty stdout, long output, invalid configuration, expired credentials, and an ambiguous reply. | Replies and local fault states follow the contracts above. The reply marks truncated output. Ambiguous delivery does not trigger a resend. |

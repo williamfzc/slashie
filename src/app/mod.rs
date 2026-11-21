@@ -77,6 +77,7 @@ struct AppState {
     runtime_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     shutting_down: AtomicBool,
     polling_item: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
+    connection_checked_at: Mutex<Option<Instant>>,
 }
 
 pub fn run(rt: Arc<Runtime>, shutdown: Arc<AtomicBool>) {
@@ -95,6 +96,7 @@ pub fn run(rt: Arc<Runtime>, shutdown: Arc<AtomicBool>) {
         runtime_thread: Mutex::new(Some(runtime_thread)),
         shutting_down: AtomicBool::new(false),
         polling_item: Mutex::new(None),
+        connection_checked_at: Mutex::new(None),
     };
 
     tauri::Builder::default()
@@ -104,6 +106,9 @@ pub fn run(rt: Arc<Runtime>, shutdown: Arc<AtomicBool>) {
             edit_config,
             open_log,
             get_status,
+            set_polling,
+            save_settings,
+            check_connection,
             report_settings
         ])
         .setup(|app| {
@@ -450,7 +455,8 @@ fn open_settings(app: &AppHandle) {
                     WebviewUrl::App("index.html".into()),
                 )
                 .title("Slashie Settings")
-                .inner_size(560.0, 430.0)
+                .inner_size(520.0, 420.0)
+                .min_inner_size(400.0, 300.0)
                 .center()
                 .build()?;
                 let hide_on_close = window.clone();
@@ -480,9 +486,8 @@ fn open_settings(app: &AppHandle) {
 
 // ---- Settings window commands (DESIGN.md: same schema and validator) ----
 
-/// The read-only configuration mirror (menu-bar.md "Settings"): the raw
-/// config.json, verbatim. The window never edits; every change goes through
-/// the route subcommands or the file itself.
+/// Raw configuration snapshot; Settings edits use the shared validator and
+/// stale-write guard. CLI and external edits target the same file.
 #[derive(serde::Serialize)]
 struct SettingsPayload {
     config_text: String,
@@ -530,9 +535,8 @@ fn open_log(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-/// Open config.json in the user's default text editor (menu-bar.md
-/// "Settings"): the mirror is read-only, so hand edits happen in the file
-/// itself and apply at the next scan.
+/// Open the same config.json in an external editor; saved valid changes apply
+/// at the next scan, just like validated in-window edits.
 #[tauri::command]
 fn edit_config(state: State<'_, AppState>) -> Result<(), String> {
     let path = state.rt.home.join("config.json");
@@ -558,6 +562,60 @@ fn report_settings(state: State<'_, AppState>, message: String) {
         .log(&format!("settings window: {}", message));
 }
 
+#[tauri::command]
+fn set_polling(state: State<'_, AppState>, on: bool) -> Result<bool, String> {
+    if state.shutting_down.load(Ordering::SeqCst) || state.rt.is_intake_blocked() {
+        return Err("Fix the connection before starting".into());
+    }
+    state
+        .rt
+        .apply_poll_setting(on)
+        .map_err(|_| "Cannot save listening state".to_string())?;
+    Ok(state.rt.state.lock().unwrap().polling)
+}
+
+/// Preserve unknown JSON properties and reject stale editors instead of overwriting.
+fn write_settings(home: &std::path::Path, expected: &str, text: &str) -> Result<(), String> {
+    let path = home.join("config.json");
+    let current = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    if current != expected {
+        return Err("Configuration changed. Reopen the editor.".into());
+    }
+    Config::parse(text).map_err(|e| e.to_string())?;
+    crate::config::atomic_write(&path, text).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_settings(state: State<'_, AppState>, expected: String, text: String) -> Result<(), String> {
+    write_settings(&state.rt.home, &expected, &text)
+}
+
+fn reserve_connection_check(checked: &mut Option<Instant>, now: Instant) -> Result<(), String> {
+    if checked.is_some_and(|at| now.duration_since(at) < Duration::from_secs(60)) {
+        return Err("Wait one minute before checking again".into());
+    }
+    *checked = Some(now);
+    Ok(())
+}
+
+fn recent_evidence(at: i64, now: i64) -> bool {
+    at > 0 && now >= at && now - at < 120_000
+}
+
+#[tauri::command]
+async fn check_connection(state: State<'_, AppState>) -> Result<(), String> {
+    {
+        let mut checked = state.connection_checked_at.lock().unwrap();
+        reserve_connection_check(&mut checked, Instant::now())?;
+    }
+    let transport = state.rt.transport.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        transport.check_connection().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[derive(serde::Serialize)]
 struct StatusPayload {
     polling: bool,
@@ -566,6 +624,12 @@ struct StatusPayload {
     scanning: bool,
     /// Whole seconds until the run loop's next scan, when scheduled.
     next_scan_in_secs: Option<u64>,
+    can_toggle: bool,
+    receive_status: &'static str,
+    reply_status: &'static str,
+    last_scan_ms: i64,
+    pending_jobs: usize,
+    work_status: &'static str,
 }
 
 #[tauri::command]
@@ -583,11 +647,60 @@ fn get_status(state: State<'_, AppState>) -> StatusPayload {
         .unwrap()
         .and_then(|wake| wake.checked_duration_since(Instant::now()))
         .map(|d| d.as_secs());
+    let st = state.rt.state.lock().unwrap();
+    let last_scan_ms = st.last_scan_end_ms;
+    let pending_jobs = st.waiting_count();
+    let last_reply = st
+        .claims
+        .iter()
+        .filter(|c| c.settled_at_ms.is_some())
+        .max_by_key(|c| c.settled_at_ms)
+        .and_then(|c| c.outcome.as_deref());
+    let work_status = if last_reply.is_some_and(|r| r.starts_with("source_unavailable:")) {
+        "source_unavailable"
+    } else if last_reply.is_some_and(|r| r.starts_with("timeout:")) {
+        "timeout"
+    } else if last_reply.is_some_and(|r| r.starts_with("failed:")) {
+        "failed"
+    } else {
+        "idle"
+    };
+    let reply_status = if state.rt.config.lock().unwrap().reply_mode
+        == crate::config::ReplyMode::Agent
+    {
+        "agent"
+    } else if state.rt.transport.can_reply() == Some(false) {
+        "blocked"
+    } else if status.reply_failed || last_reply.is_some_and(|r| r.contains("reply_rejected")) {
+        "failed"
+    } else if status.reply_unconfirmed || last_reply.is_some_and(|r| r.contains("reply_uncertain"))
+    {
+        "unknown"
+    } else if last_reply.is_some_and(|r| r.contains("reply_sent")) {
+        "verified"
+    } else {
+        "unknown"
+    };
+    let receive_status = if state.rt.is_intake_blocked() {
+        "blocked"
+    } else if status.retrying.is_some() {
+        "retrying"
+    } else if recent_evidence(last_scan_ms, crate::logging::now_ms()) {
+        "verified"
+    } else {
+        "unknown"
+    };
     StatusPayload {
         polling,
         status_text: status_line(&status),
         scanning: status.scanning,
         next_scan_in_secs,
+        can_toggle: !state.rt.is_intake_blocked() && !state.shutting_down.load(Ordering::SeqCst),
+        receive_status,
+        reply_status,
+        last_scan_ms,
+        pending_jobs,
+        work_status,
     }
 }
 
@@ -595,6 +708,40 @@ fn get_status(state: State<'_, AppState>) -> StatusPayload {
 mod tests {
     use super::*;
     use crate::status::{OperatorFault, Phase, RetryKind};
+
+    #[test]
+    fn checks_are_rate_limited_and_evidence_expires() {
+        let now = Instant::now();
+        let mut checked = None;
+        assert!(reserve_connection_check(&mut checked, now).is_ok());
+        assert!(reserve_connection_check(&mut checked, now + Duration::from_secs(59)).is_err());
+        assert!(reserve_connection_check(&mut checked, now + Duration::from_secs(60)).is_ok());
+        assert!(recent_evidence(1000, 120_999));
+        assert!(!recent_evidence(1000, 121_000));
+        assert!(!recent_evidence(0, 1));
+        assert!(!recent_evidence(1000, 999));
+    }
+
+    #[test]
+    fn settings_editor_validates_and_rejects_stale_writes() {
+        let home = std::env::temp_dir().join(format!("slashie-edit-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let initial = serde_json::to_string(&Config::default()).unwrap();
+        std::fs::write(home.join("config.json"), &initial).unwrap();
+        assert!(write_settings(&home, "stale", &initial).is_err());
+        assert!(write_settings(&home, &initial, "{invalid").is_err());
+        let cfg = Config {
+            poll_interval: 30,
+            ..Config::default()
+        };
+        let updated = serde_json::to_string(&cfg).unwrap();
+        write_settings(&home, &initial, &updated).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(home.join("config.json")).unwrap(),
+            updated
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn settings_payload_reports_identity_binding() {
