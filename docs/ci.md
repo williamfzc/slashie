@@ -12,7 +12,10 @@ documentation structure, headless and tray release builds, and the GUI-free
 dependency guard — is
 [.github/workflows/ci.yml](../.github/workflows/ci.yml); reuse its commands
 rather than re-deriving flags. Both a Linux headless job and a macOS tray
-job must pass.
+job must pass. A macOS packaging job runs on every push to `main`: it
+verifies the dependency lock, builds the
+[.app bundle](DESIGN.md#desktop-build) with the pinned Tauri CLI, and
+uploads `Slashie.app` as a workflow artifact.
 
 Commits follow Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`).
 Rust dependencies are locked through the committed `Cargo.lock`.

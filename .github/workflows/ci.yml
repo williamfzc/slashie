@@ -61,3 +61,36 @@ jobs:
         run: cargo build --release --locked --features tray
       - name: Headless build also succeeds on macOS
         run: cargo build --release --locked --no-default-features
+
+  macos-package:
+    # Bundle the macOS .app on main so every push ships an installable
+    # artifact (DESIGN.md "Desktop build" artifacts table).
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify the dependency lock
+        run: cargo build --locked --features tray
+      - name: Install tauri-cli (pinned, prebuilt)
+        run: |
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            arm64) TAURI_ARCH=aarch64 ;;
+            x86_64) TAURI_ARCH=x86_64 ;;
+            *) echo "unsupported arch: $ARCH" && exit 1 ;;
+          esac
+          curl -fsSL \
+            "https://github.com/tauri-apps/tauri-cli/releases/download/v2.12.5/cargo-tauri-${TAURI_ARCH}-apple-darwin.tar.gz" \
+            | tar -xz -C /usr/local/bin
+          cargo tauri --version
+      - name: Bundle the .app
+        run: cargo tauri build --features tray --bundles app
+      - name: Upload the app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Slashie-macos
+          path: target/release/bundle/macos/Slashie.app
