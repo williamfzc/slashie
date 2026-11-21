@@ -182,11 +182,25 @@
       // The mirror shows the file as it is, valid or not; the banner only
       // explains why the runtime is ignoring it.
       configText.textContent = settings.config_text || "(empty)";
-      if (settings.config_unparsable) {
-        error.textContent =
-          "config.json cannot be parsed. Fix the file and this mirror reloads by itself.";
-      } else {
-        error.textContent = "";
+      const banner = settings.config_unparsable
+        ? "config.json cannot be parsed. Fix the file and this mirror reloads by itself."
+        : "";
+      // Touch the alert only on change so screen readers are not
+      // re-announced every second.
+      if (error.textContent !== banner) error.textContent = banner;
+    }
+
+    let failureReported = false;
+
+    function reportFailureOnce(message) {
+      // The window has no console; report a broken connection to the log
+      // once per failure episode so it is observable (menu-bar.md).
+      if (failureReported) return;
+      failureReported = true;
+      try {
+        Promise.resolve(invoke?.("report_settings", { message })).catch(() => {});
+      } catch {
+        // Nothing more we can do without the bridge.
       }
     }
 
@@ -197,11 +211,14 @@
           invoke("get_status"),
           invoke("get_settings"),
         ]);
+        failureReported = false;
         renderRuntimeStatus(runtime);
         renderSettings(settings);
       } catch (failure) {
         runtimeDot.classList.remove("on", "scanning");
-        runtimeText.textContent = `Status unavailable. ${failure.message ?? failure}`;
+        const message = `Status unavailable. ${failure.message ?? failure}`;
+        runtimeText.textContent = message;
+        reportFailureOnce(message);
       }
     }
     setInterval(refresh, 1000);

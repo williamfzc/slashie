@@ -15,7 +15,7 @@ Use one fixed-size `/` template icon with the accessible name `Slashie`. macOS s
 | State | Icon |
 | --- | --- |
 | Polling paused | The whole glyph dimmed, completely still. |
-| Startup, shutdown, a fault, or a retry (any state with a status line) | The plain glyph; the read-only line carries the detail. |
+| Shutdown, a fault, or a retry — any state with a status line while polling is on | The plain glyph; the read-only line carries the detail. |
 | Polling healthy | A comet — a bright dot with a fading tail — circling the whole glyph, never stopping while the switch is on: dim and calm between scans, bright and twice as fast while a scan is in flight, staying bright for about a second and a half after a complete scan, including an empty one. |
 
 A primary click or keyboard activation opens the menu. This is the enabled state:
@@ -39,7 +39,7 @@ The checkmark covers normal enabled and paused states. Show a read-only line abo
 
 | Condition | Copy |
 | --- | --- |
-| Starting or shutting down | `Starting…` or `Quitting…` |
+| Shutting down | `Quitting…` (startup goes straight to the healthy frames once identity is bound) |
 | Operator action needed | `Check Settings and restart`, `Sign in to Feishu and restart`, `Local state unavailable`, `Could not save polling setting`, or `Config rejected · using last valid settings` |
 | Latest reply failed or its outcome is uncertain | `Reply failed` or `Reply unconfirmed · Check Feishu` |
 | Polling is paused while accepted work remains | `Finishing accepted requests` |

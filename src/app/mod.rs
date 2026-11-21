@@ -186,8 +186,25 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let icon = Image::from_bytes(include_bytes!("assets/tray-template.png"))?;
     let dimmed_icon = dim_icon(&icon, 40);
     let (spin_bright, spin_dim) = spin_frames(&icon);
+    // Classify before building so a paused launch never shows the
+    // full-brightness glyph for one sampling interval.
+    let initial_frame = {
+        let status = state.rt.status.lock().unwrap().clone();
+        tray_frame(&status, polling_now, Instant::now(), 0)
+    };
+    let initial_icon = match initial_frame {
+        Frame::Dimmed => &dimmed_icon,
+        Frame::Plain => &icon,
+        Frame::Spin { bright, .. } => {
+            if bright {
+                &spin_bright[0]
+            } else {
+                &spin_dim[0]
+            }
+        }
+    };
     let tray = TrayIconBuilder::with_id("slashie-tray")
-        .icon(icon.clone())
+        .icon(initial_icon.clone())
         .icon_as_template(true)
         .tooltip("Slashie")
         .menu(&menu)
@@ -209,6 +226,7 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     // on changes so sampling the frame doesn't churn the native menu.
     std::thread::spawn(move || {
         let mut last_text = initial_status;
+        let mut last_frame = initial_frame;
         let mut last_polling = polling_now;
         // Exact first pass: the sampling loop below compares against this.
         let initial_toggleable = {
@@ -217,8 +235,6 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         };
         let mut last_toggleable = initial_toggleable;
         let _ = polling.set_enabled(initial_toggleable);
-        // The builder installed the plain glyph.
-        let mut last_frame = Frame::Plain;
         let mut tick: u64 = 0;
         loop {
             let state: tauri::State<AppState> = app.state();
@@ -287,8 +303,10 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 last_polling = polling_now;
             }
             // An unavailable setting must not be toggleable (menu-bar.md):
-            // a blocked intake means the state file cannot be trusted.
-            let toggleable = !state.rt.is_intake_blocked();
+            // a blocked intake means the state file cannot be trusted, and
+            // a shutdown in progress must not persist new settings.
+            let toggleable =
+                !state.rt.is_intake_blocked() && !state.shutting_down.load(Ordering::SeqCst);
             if toggleable != last_toggleable {
                 if polling.set_enabled(toggleable).is_err() {
                     return;
@@ -435,7 +453,7 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
                 };
                 let _ = app_for_task.run_on_main_thread(move || {
                     if let Some(item) = polling_item {
-                        let _ = item.set_enabled(true);
+                        let _ = item.set_enabled(!rt_for_finish.is_intake_blocked());
                         // The checkmark reflects the saved setting even when
                         // an enabled poller is retrying.
                         let _ = item.set_checked(saved_now);
