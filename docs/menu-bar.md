@@ -15,8 +15,8 @@ Use one fixed-size `/` template icon with the accessible name `Slashie`. macOS s
 | State | Icon |
 | --- | --- |
 | Polling paused | The whole glyph dimmed, completely still. |
-| Shutdown, a fault, or a retry — any state with a status line while polling is on | The plain glyph; the read-only line carries the detail. A scan in flight breathes up to full brightness and back within half a second, never a snap. |
-| Polling healthy | The whole glyph breathing smoothly on a one-second cycle — quicker while a scan is in flight, holding full brightness for about a second and a half after a complete scan, including an empty one. It never goes fully dark while the switch is on. |
+| Shutdown, a fault, or a retry — any state with a status line while polling is on | The plain glyph; the read-only line carries the detail. |
+| Polling healthy | The whole glyph breathing smoothly — a code-driven sine at 30 fps on a one-second cycle, never disappearing while the switch is on. A scan doubles the breath speed, and a completed scan holds full brightness briefly; the breath phase never jumps, so every state change morphs instead of snapping. |
 
 A primary click or keyboard activation opens the menu. This is the enabled state:
 
@@ -64,8 +64,8 @@ The window is a mirror of `config.json`, shown verbatim — not an editor. Edits
 
 - From Finder, check the native menu in light and dark appearances. Verify keyboard navigation, Escape dismissal, and VoiceOver reading `Polling` and its checked state.
 - Launch both a bundled and an unbundled dev build and verify that neither shows a Dock icon or a Cmd+Tab entry while the tray item stays available.
-- Verify the dimmed glyph completely still while polling is off, and the whole glyph breathing while it is on: a one-second cycle between scans, a smooth half-second triangle during a scan, full brightness held briefly after a scan completes (including an empty one). Verify the plain glyph during scan failure, retry, and shutdown, and confirm the icon and neighboring items stay in place throughout. The motion must match the switch: nothing animates while polling is off.
-- Verify the frames read at a glance in light and dark appearances and that the dot is visible without relying on color alone.
+- Verify the dimmed glyph completely still while polling is off, and the whole glyph breathing smoothly while it is on: a one-second cycle between scans, double speed during a scan, full brightness held briefly after a scan completes (including an empty one) and then resumed without a snap. Verify the plain glyph during scan failure, retry, and shutdown, and confirm the icon and neighboring items stay in place throughout. The motion must match the switch: nothing animates while polling is off, and state changes morph rather than snap.
+- Verify the frames read at a glance in light and dark appearances and that the breath is visible without relying on color alone.
 - Turn polling off during a command and verify the [pause behavior](product.md#pause-and-recovery). Exercise backoff, failed setting writes, and an uncertain reply. Confirm normal states use the checkmark alone.
 - Open Settings while polling and verify the runtime status line counts down to the next scan, switches to `Scanning…` while a scan runs, and shows `Paused` when polling is off. Verify it carries the status-line copy during a fault, the account line names the verified identity and its binding status, and the dot does not animate when reduced motion is set.
 - Open Settings and verify the mirror shows `config.json` verbatim. Run `slashie route add` in a terminal and confirm the new route appears within a couple of seconds without reopening the window. Use `Edit Config`, change a value, save the file, and confirm the mirror and the next scan pick it up; introduce a syntax error and confirm the mirror still shows the file with the explanation, then repair it and confirm recovery. Confirm that the log opens from Settings.

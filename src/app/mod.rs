@@ -17,13 +17,14 @@ use tauri::{
     AppHandle, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder,
 };
 
-/// How long the dot stays bright after a complete scan, including an
-/// empty one (menu-bar.md "Status item and menu").
+/// How long the glyph holds full brightness after a complete scan,
+/// including an empty one (menu-bar.md "Status item and menu").
 const SCAN_FLASH_DURATION: Duration = Duration::from_millis(1500);
 
-/// Sampling cadence of the tray thread; eight levels at this rate give the
-/// glyph a one-second breath cycle, twice as fast during a scan.
-const SAMPLE_INTERVAL: Duration = Duration::from_millis(125);
+/// Sampling cadence of the tray thread; the thirty-level sine table at
+/// this rate gives the glyph a one-second breath cycle at 30 fps, twice as
+/// fast during a scan.
+const SAMPLE_INTERVAL: Duration = Duration::from_millis(33);
 
 /// The menu-bar icon frames (menu-bar.md "Status item and menu").
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -39,38 +40,35 @@ enum Frame {
     Breath { level: usize },
 }
 
-/// Whole-glyph breathing: eight sine-sampled alpha levels from 35% to
-/// full, one level per sample (125 ms) — a one-second breath cycle.
-const BREATH_LEVELS: usize = 8;
+/// Whole-glyph breathing: thirty sine-sampled alpha levels from 35% to
+/// full. The breath phase advances continuously — one step per sample
+/// (33 ms, a one-second cycle) while the poller idles, two while a scan is
+/// in flight — so entering or leaving a scan morphs the motion instead of
+/// snapping it.
+const BREATH_LEVELS: usize = 30;
 const BREATH_MIN: u32 = 35;
 
-/// Classify the icon frame for the current runtime state. `tick` counts
-/// loop iterations and advances the spinner while a scan is in flight.
-fn tray_frame(status: &RuntimeStatus, polling: bool, now: Instant, tick: u64) -> Frame {
+/// Classify the icon frame for the current runtime state. `phase` is the
+/// sampler's continuous breath position; output may hold or freeze while
+/// the phase runs on, so transitions never snap.
+fn tray_frame(status: &RuntimeStatus, polling: bool, now: Instant, phase: u64) -> Frame {
     if !polling {
         return Frame::Dimmed;
     }
     if status_line(status).is_some() {
         return Frame::Plain;
     }
-    if status.scanning {
-        // Quicker breath: the scan is felt.
-        return Frame::Breath {
-            level: (tick % (BREATH_LEVELS as u64 / 2)) as usize,
-        };
-    }
-    // A completed scan holds full brightness briefly, then the calm breath
-    // resumes — the switch is on and the poller is alive.
-    if status
-        .last_successful_scan
-        .is_some_and(|scan| now.duration_since(scan) < SCAN_FLASH_DURATION)
-    {
-        return Frame::Breath {
-            level: BREATH_LEVELS / 2,
-        };
+    // A completed scan holds full brightness briefly; the phase keeps
+    // advancing underneath, so the hold ends mid-breath without a snap.
+    if let Some(scan) = status.last_successful_scan {
+        if now.duration_since(scan) < SCAN_FLASH_DURATION {
+            return Frame::Breath {
+                level: BREATH_LEVELS / 2,
+            };
+        }
     }
     Frame::Breath {
-        level: (tick % BREATH_LEVELS as u64) as usize,
+        level: (phase % BREATH_LEVELS as u64) as usize,
     }
 }
 
@@ -231,7 +229,7 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         };
         let mut last_toggleable = initial_toggleable;
         let _ = polling.set_enabled(initial_toggleable);
-        let mut tick: u64 = 0;
+        let mut phase: u64 = 0;
         loop {
             let state: tauri::State<AppState> = app.state();
             if state.rt.shutdown.load(Ordering::SeqCst)
@@ -251,12 +249,18 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             state.rt.refresh_status();
             let status = state.rt.status.lock().unwrap().clone();
             let polling_now = state.rt.state.lock().unwrap().polling;
+            let healthy = polling_now && status_line(&status).is_none();
             let frame = if state.shutting_down.load(Ordering::SeqCst) {
                 Frame::Plain
             } else {
-                tray_frame(&status, polling_now, Instant::now(), tick)
+                tray_frame(&status, polling_now, Instant::now(), phase)
             };
-            tick = tick.wrapping_add(1);
+            // The breath phase advances continuously: faster while a scan
+            // is in flight, frozen while the glyph is still — so state
+            // changes morph instead of snap.
+            if healthy || status.scanning {
+                phase = phase.wrapping_add(if status.scanning { 2 } else { 1 });
+            }
             if frame != last_frame {
                 let next_icon = match frame {
                     Frame::Dimmed => &dimmed_icon,
@@ -619,57 +623,61 @@ mod tests {
     #[test]
     fn frames_distinguish_paused_fault_and_polling() {
         let now = Instant::now();
-        // Paused dims the glyph, completely still at any tick.
-        for tick in [0, 3, 6, 9] {
+        // Paused dims the glyph, completely still at any phase.
+        for phase in [0, 7, 15, 29] {
             assert_eq!(
-                tray_frame(&RuntimeStatus::default(), false, now, tick),
+                tray_frame(&RuntimeStatus::default(), false, now, phase),
                 Frame::Dimmed
             );
         }
 
-        // Polling on: the whole glyph breathes on a one-second cycle.
+        // Polling on: the glyph breathes with the phase, one level per step.
         let mut status = RuntimeStatus::default();
         assert_eq!(
             tray_frame(&status, true, now, 0),
             Frame::Breath { level: 0 }
         );
         assert_eq!(
-            tray_frame(&status, true, now, 4),
-            Frame::Breath { level: 4 }
+            tray_frame(&status, true, now, 15),
+            Frame::Breath { level: 15 }
         );
         assert_eq!(
-            tray_frame(&status, true, now, 8),
+            tray_frame(&status, true, now, 30),
             Frame::Breath { level: 0 }
         );
 
-        // A scan in flight quickens the breath (half cycle).
+        // A scan doubles the phase speed in the sampler, through the same
+        // sine: the classifier itself just maps the phase — the level
+        // continues from wherever the breath was, never snapping.
         status.scanning = true;
         assert_eq!(
-            tray_frame(&status, true, now, 0),
-            Frame::Breath { level: 0 }
+            tray_frame(&status, true, now, 5),
+            Frame::Breath { level: 5 }
         );
         assert_eq!(
-            tray_frame(&status, true, now, 2),
-            Frame::Breath { level: 2 }
+            tray_frame(&status, true, now, 29),
+            Frame::Breath { level: 29 }
         );
-        assert_eq!(tray_frame(&status, false, now, 0), Frame::Dimmed);
+        assert_eq!(tray_frame(&status, false, now, 5), Frame::Dimmed);
 
-        // After a complete scan the glyph holds full brightness, then the
-        // calm breath resumes.
+        // After a complete scan the glyph holds full brightness while the
+        // phase keeps advancing underneath.
         status.scanning = false;
         status.last_successful_scan = Some(now);
         assert_eq!(
-            tray_frame(&status, true, now, 0),
-            Frame::Breath { level: 4 }
-        );
-        // At now + FLASH the hold has elapsed: the calm breath resumes.
-        assert_eq!(
-            tray_frame(&status, true, now + SCAN_FLASH_DURATION, 0),
-            Frame::Breath { level: 0 }
+            tray_frame(&status, true, now, 3),
+            Frame::Breath { level: 15 }
         );
         assert_eq!(
-            tray_frame(&status, true, now + SCAN_FLASH_DURATION, 1),
-            Frame::Breath { level: 1 }
+            tray_frame(&status, true, now, 17),
+            Frame::Breath { level: 15 }
+        );
+
+        // When the hold ends the sine resumes at the current phase.
+        let after = now + SCAN_FLASH_DURATION;
+        assert_eq!(
+            tray_frame(&status, true, after, 21),
+            Frame::Breath { level: 21 }
         );
 
         // The status line carries faults; the breath drops out.
