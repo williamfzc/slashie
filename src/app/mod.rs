@@ -46,11 +46,13 @@ enum Frame {
     },
 }
 
-/// The spinner orbit sits in the clear triangle beside the slash tail
-/// (verified against the 32x32 template's alpha grid).
-const SPIN_STEPS: usize = 8;
-const SPIN_CENTER: (f64, f64) = (12.0, 25.0);
-const SPIN_RADIUS: f64 = 4.0;
+/// The comet orbit circles the whole glyph: 16 steps per revolution, the
+/// head bright and the tail fading behind it.
+const SPIN_STEPS: usize = 16;
+const SPIN_CENTER: (f64, f64) = (16.0, 16.0);
+const SPIN_RADIUS: f64 = 13.0;
+/// Trail dots behind the head, as alpha scale factors.
+const TRAIL_SCALES: [f64; 3] = [0.55, 0.3, 0.12];
 
 /// Classify the icon frame for the current runtime state. `tick` counts
 /// loop iterations and advances the spinner while a scan is in flight.
@@ -81,7 +83,7 @@ fn tray_frame(status: &RuntimeStatus, polling: bool, now: Instant, tick: u64) ->
         .last_successful_scan
         .is_some_and(|scan| now.duration_since(scan) < SCAN_FLASH_DURATION);
     Frame::Spin {
-        step: step(3),
+        step: step(1),
         bright,
     }
 }
@@ -305,11 +307,12 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 last_toggleable = toggleable;
             }
-            // Advance the spinner faster than the static sampling cadence.
-            std::thread::sleep(if matches!(frame, Frame::Spin { .. }) {
-                SPIN_INTERVAL
-            } else {
-                SAMPLE_INTERVAL
+            // Orbit cadence: fast and bright during a scan, slower and dim
+            // between scans; static sampling everywhere else.
+            std::thread::sleep(match frame {
+                Frame::Spin { bright, .. } if bright => SPIN_INTERVAL / 2,
+                Frame::Spin { .. } => SPIN_INTERVAL,
+                _ => SAMPLE_INTERVAL,
             });
         }
     });
@@ -344,7 +347,9 @@ fn dot_alphas(bright: bool) -> [[u8; 4]; 4] {
     }
 }
 
-/// Stamp a 4x4 dot with its top-left corner at (ox, oy), clamped to the icon.
+/// Stamp a 4x4 dot with its top-left corner at (ox, oy), clamped to the
+/// icon. The dot's alpha takes the maximum with what is underneath, so the
+/// orbit passing over the glyph merges with it instead of erasing it.
 fn dot_icon_at(base: &Image<'_>, ox: isize, oy: isize, alphas: [[u8; 4]; 4]) -> Image<'static> {
     let mut rgba = base.rgba().to_vec();
     let width = base.width() as isize;
@@ -356,32 +361,50 @@ fn dot_icon_at(base: &Image<'_>, ox: isize, oy: isize, alphas: [[u8; 4]; 4]) -> 
                 continue;
             }
             let pixel = ((py * width + px) * 4) as usize;
-            rgba[pixel..pixel + 4].copy_from_slice(&[0, 0, 0, *opacity]);
+            let under = rgba[pixel + 3];
+            rgba[pixel + 3] = under.max(*opacity);
         }
     }
     Image::new_owned(rgba, base.width(), base.height())
 }
 
-/// The orbit frames, bright (scan in flight or just completed) and dim
-/// (between scans): the dot circles the clear space beside the slash tail,
-/// and never stops while the polling switch is on.
+/// The comet frames: a bright head with a fading tail circling the glyph.
+/// Two brightness sets — bright (scan in flight or just completed) and dim
+/// (between scans). The orbit never stops while the polling switch is on.
 fn spin_frames(base: &Image<'_>) -> (Vec<Image<'static>>, Vec<Image<'static>>) {
-    let orbit = |alphas: [[u8; 4]; 4]| {
+    let orbit = |bright: bool| {
         (0..SPIN_STEPS)
             .map(|step| {
-                let angle = step as f64 * std::f64::consts::TAU / SPIN_STEPS as f64;
-                let cx = SPIN_CENTER.0 + SPIN_RADIUS * angle.cos();
-                let cy = SPIN_CENTER.1 + SPIN_RADIUS * angle.sin();
-                dot_icon_at(
-                    base,
-                    cx.round() as isize - 1,
-                    cy.round() as isize - 1,
-                    alphas,
-                )
+                // Stamp the head, then the tail fading behind it, each onto
+                // the previous result: the lifetime stays 'static after the
+                // first stamp because dot_icon_at owns its output.
+                let mut frame: Option<Image<'static>> = None;
+                for (offset, scale) in std::iter::once((0u64, 1.0)).chain(
+                    TRAIL_SCALES
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| ((i + 1) as u64, *s)),
+                ) {
+                    let angle = ((step as f64 - offset as f64) * std::f64::consts::TAU
+                        / SPIN_STEPS as f64)
+                        .rem_euclid(std::f64::consts::TAU);
+                    let cx = SPIN_CENTER.0 + SPIN_RADIUS * angle.cos();
+                    let cy = SPIN_CENTER.1 + SPIN_RADIUS * angle.sin();
+                    let alphas = dot_alphas(bright)
+                        .map(|row| row.map(|v| ((v as f64 * scale) as u8).max(1)));
+                    let source: &Image<'_> = frame.as_ref().unwrap_or(base);
+                    frame = Some(dot_icon_at(
+                        source,
+                        cx.round() as isize - 1,
+                        cy.round() as isize - 1,
+                        alphas,
+                    ));
+                }
+                frame.expect("the trail loop always stamps the head")
             })
             .collect()
     };
-    (orbit(dot_alphas(true)), orbit(dot_alphas(false)))
+    (orbit(true), orbit(false))
 }
 
 /// Template icons carry their shape in alpha; dimming it signals paused.
@@ -640,9 +663,16 @@ mod tests {
             }
         );
         assert_eq!(
-            tray_frame(&RuntimeStatus::default(), true, now, 27),
+            tray_frame(&RuntimeStatus::default(), true, now, 1),
             Frame::Spin {
                 step: 1,
+                bright: false
+            }
+        );
+        assert_eq!(
+            tray_frame(&RuntimeStatus::default(), true, now, 16),
+            Frame::Spin {
+                step: 0,
                 bright: false
             }
         );
@@ -667,7 +697,7 @@ mod tests {
             }
         );
 
-        // A scan in flight orbits fast and bright.
+        // A scan in flight orbits the same path, fast and bright.
         status.scanning = true;
         assert_eq!(
             tray_frame(&status, true, now, 0),
@@ -677,16 +707,16 @@ mod tests {
             }
         );
         assert_eq!(
-            tray_frame(&status, true, now, 8),
+            tray_frame(&status, true, now, 1),
             Frame::Spin {
-                step: 0,
+                step: 1,
                 bright: true
             }
         );
         assert_eq!(
-            tray_frame(&status, true, now, 1),
+            tray_frame(&status, true, now, 16),
             Frame::Spin {
-                step: 1,
+                step: 0,
                 bright: true
             }
         );
