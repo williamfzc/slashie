@@ -1830,8 +1830,8 @@ mod tests {
             .collect();
         // Give every message its own conversation, like 20 different chats.
         let mut fixture = fixture_with(msgs);
-        for n in 0..20 {
-            fixture.messages[n].chat_id = format!("oc_conv{n}");
+        for (n, message) in fixture.messages.iter_mut().enumerate() {
+            message.chat_id = format!("oc_conv{n}");
         }
         let (rt, mock, home) = init_rt("convslots", fixture, boundary);
         // Pre-fill 12 live mailboxes with blocked workers, so the
