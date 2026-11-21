@@ -26,7 +26,7 @@ No bots, no webhooks, no servers: Slashie polls through [Lark CLI](https://githu
 3. Enable `Polling` from the menu-bar icon.
 4. Send `/ping hello` in any Feishu chat your account can reach.
 
-Grab the latest build from the [Actions artifacts](https://github.com/williamfzc/slashie/actions/workflows/ci.yml) (the `Slashie-macos` artifact on `main`), or build from source:
+Grab the latest build from [Releases](https://github.com/williamfzc/slashie/releases) (built automatically on version tags), or build from source:
 
 ```sh
 cargo build --release --locked                 # headless binary (Linux too)

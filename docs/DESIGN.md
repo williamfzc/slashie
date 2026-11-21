@@ -34,7 +34,7 @@ Use Tauri 2 for the macOS shell. Enable `tray` only in native macOS builds. Gate
 
 | Artifact | Build and acceptance |
 | --- | --- |
-| macOS bundle | `cargo tauri build --features tray --bundles app`. Run the [menu acceptance checks](menu-bar.md#acceptance) on the installed bundle. |
+| macOS bundle | `cargo tauri build --features tray --bundles app,dmg`. Pushing a `v*` tag builds the bundle through the release workflow and publishes it on a GitHub Release. Run the [menu acceptance checks](menu-bar.md#acceptance) on the installed bundle. |
 | Headless binary | `cargo build --release --no-default-features`. Inspect `cargo tree --no-default-features --edges normal,build` for GUI dependencies. Build and run on Linux without a display session. |
 | Shared runtime | Run the same controlled search and `/ping` cases through both macOS launch modes. Check lock contention and verify that switching modes preserves the polling setting and durable claims. |
 

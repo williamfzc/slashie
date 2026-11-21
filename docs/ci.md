@@ -19,3 +19,10 @@ uploads `Slashie.app` as a workflow artifact.
 
 Commits follow Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`).
 Rust dependencies are locked through the committed `Cargo.lock`.
+
+## Releases
+
+A separate workflow (`.github/workflows/release.yml`) runs only when a `v*`
+tag is pushed: it builds the macOS `.app` and DMG plus the Linux headless
+binary, and publishes a GitHub Release with those artifacts. Release versions
+come from the tag; nothing installable is produced by ordinary pushes.

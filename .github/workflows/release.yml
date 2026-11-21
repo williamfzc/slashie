@@ -1,0 +1,95 @@
+name: Release
+
+# Tag-driven releases (DESIGN.md "Desktop build"): push a `v*` tag and the
+# installable artifacts are built and attached to a GitHub Release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS app bundle
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify the dependency lock
+        run: cargo build --locked --features tray
+      - name: Install tauri-cli (pinned, prebuilt via npm)
+        run: |
+          npm install -g @tauri-apps/cli@2.12.5
+          tauri --version
+      - name: Bundle the .app and the DMG
+        run: tauri build --features tray --bundles app,dmg
+      - name: Stage release artifacts
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p staging
+          cp target/release/bundle/macos/*.dmg "staging/Slashie_${VERSION}_aarch64.dmg"
+          tar -czf "staging/Slashie_${VERSION}_aarch64.app.tar.gz" \
+            -C target/release/bundle/macos Slashie.app
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: staging/*
+
+  headless-linux:
+    name: Headless binary (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify the GUI-free dependency graph
+        run: |
+          set -o pipefail
+          cargo tree --locked --no-default-features --edges normal,build \
+            | tee /tmp/headless-tree.txt
+          if grep -Eiq 'tauri|rfd' /tmp/headless-tree.txt; then
+            echo "GUI dependency found in headless graph" >&2
+            exit 1
+          fi
+      - name: Build the headless binary
+        run: cargo build --release --locked --no-default-features
+      - name: Stage release artifacts
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p staging
+          tar -czf "staging/slashie_${VERSION}_x86_64_linux.tar.gz" \
+            -C target/release slashie
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: staging/*
+
+  release:
+    name: Publish the GitHub release
+    needs: [macos, headless-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Download staged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: staging
+      - name: Create the release with its artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" \
+          --repo "$GITHUB_REPOSITORY" \
+          --title "Slashie $GITHUB_REF_NAME" \
+          --generate-notes \
+          staging/*
