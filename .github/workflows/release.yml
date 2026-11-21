@@ -31,9 +31,16 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p staging
-          cp target/release/bundle/macos/*.dmg "staging/Slashie_${VERSION}_aarch64.dmg"
+          # The DMG lands in bundle/dmg; the .app in bundle/macos. The DMG
+          # is optional: the app tarball alone is fully installable.
+          if compgen -G "target/release/bundle/dmg/*.dmg" > /dev/null; then
+            cp target/release/bundle/dmg/*.dmg "staging/Slashie_${VERSION}_aarch64.dmg"
+          else
+            echo "warning: no DMG produced; shipping the app tarball only" >&2
+          fi
           tar -czf "staging/Slashie_${VERSION}_aarch64.app.tar.gz" \
             -C target/release/bundle/macos Slashie.app
+          test -f "staging/Slashie_${VERSION}_aarch64.app.tar.gz"
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
