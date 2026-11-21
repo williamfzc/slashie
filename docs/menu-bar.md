@@ -14,7 +14,7 @@ Use one fixed-size `/` template icon with the accessible name `Slashie`. macOS s
 
 | State | Icon |
 | --- | --- |
-| Polling paused | The whole glyph dimmed. |
+| Polling paused | The whole glyph dimmed, breathing slowly — alive but idle. |
 | Startup, shutdown, a fault, or a retry (any state with a status line) | The plain glyph; the read-only line carries the detail. |
 | A scan in flight | A small dot orbiting the slash in the clear space beside its tail, about one revolution per second. |
 | Within about a second and a half after a complete scan, including an empty one | The same dot flaring bright. |
@@ -56,9 +56,8 @@ The window is a mirror of `config.json`, shown verbatim — not an editor. Edits
 | Area | Content |
 | --- | --- |
 | Runtime status | A read-only line with a small dot. It mirrors the [menu status](#status-item-and-menu): paused, the copy of any fault or retry, the scan in flight, or the interval and how long ago the last complete scan ran. The dot breathes only while a scan is in flight. It is not a live region, so screen readers read it on focus instead of announcing every refresh. Motion respects the system reduced-motion setting. |
-| Configuration | The raw `config.json`, verbatim, in a selectable monospace block. |
-| Hint | One line naming the editing paths: `Edit Config`, the CLI route commands, and `slashie --skill` for the full contract. |
-| Footer | `Edit Config` and `Open Log` on the left, the configuration path on the right. Disable `Open Log` when the log is unavailable. |
+| Configuration | The raw `config.json`, verbatim, in a selectable monospace block under a small `config.json — live` label. |
+| Footer | `Edit Config` and `Open Log` on the left, a `slashie --skill` chip on the right. Disable `Open Log` when the log is unavailable. |
 
 `Edit Config` opens `config.json` in the system's default text editor, like `Open Log` opens the log. The mirror refreshes about once a second while the window is visible, so file and CLI edits appear without reopening the window. When the configuration cannot be parsed, the mirror still shows the file verbatim with an explanation, and recovers by itself once the file is valid. Closing the window never loses anything: there is nothing to save.
 
@@ -66,7 +65,7 @@ The window is a mirror of `config.json`, shown verbatim — not an editor. Edits
 
 - From Finder, check the native menu in light and dark appearances. Verify keyboard navigation, Escape dismissal, and VoiceOver reading `Polling` and its checked state.
 - Launch both a bundled and an unbundled dev build and verify that neither shows a Dock icon or a Cmd+Tab entry while the tray item stays available.
-- Verify the dimmed glyph while polling is paused and the resting dot while it is healthy. Watch a scan in flight and confirm the dot orbits the slash, then flares after the scan completes (including an empty scan) and returns to resting. Verify the plain glyph, without the dot, during startup, scan failure, retry, and shutdown, and confirm the icon and neighboring items stay in place throughout.
+- Verify the dimmed glyph breathing slowly while polling is paused and the resting dot while it is healthy. Watch a scan in flight and confirm the dot orbits the slash, then flares after the scan completes (including an empty scan) and returns to resting. Verify the plain glyph, without the dot, during startup, scan failure, retry, and shutdown, and confirm the icon and neighboring items stay in place throughout.
 - Verify the frames read at a glance in light and dark appearances and that the dot is visible without relying on color alone.
 - Turn polling off during a command and verify the [pause behavior](product.md#pause-and-recovery). Exercise backoff, failed setting writes, and an uncertain reply. Confirm normal states use the checkmark alone.
 - Open Settings while polling and verify the runtime status line shows the interval and scan age, switches to the breathing dot while a scan runs, and shows the paused copy when polling is off. Verify it carries the status-line copy during a fault, and that the dot does not animate when reduced motion is set.

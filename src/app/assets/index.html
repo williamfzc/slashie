@@ -100,7 +100,15 @@
       border-top: 1px solid var(--line);
       padding: 10px 0 0;
     }
-    #config-path { color: var(--secondary); font-size: 11px; overflow-wrap: anywhere; user-select: all; }
+    #skill-chip {
+      padding: 3px 8px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      font: 11px/16px ui-monospace, Menlo, monospace;
+      color: var(--secondary);
+      user-select: all;
+    }
     .error { color: var(--error); font-size: 12px; overflow-wrap: anywhere; }
     #error:not(:empty) {
       border: 1px solid var(--error);
@@ -124,21 +132,13 @@
       <pre id="config-text" tabindex="0" aria-label="Configuration file contents"></pre>
     </section>
 
-    <p class="hint">
-      This window mirrors <code>config.json</code> as it is. Edit it here with
-      <code>Edit Config</code>, or have an agent use the CLI:
-      <code>slashie route add &lt;PREFIX&gt; --cmd &lt;COMMAND&gt;</code> ·
-      <code>slashie route remove &lt;PREFIX&gt;</code>. Changes apply at the
-      next scan; the full contract is <code>slashie --skill</code>.
-    </p>
-
     <footer>
       <div class="footer-group">
         <button id="edit-config" type="button">Edit Config</button>
         <button id="open-log" type="button" disabled>Open Log</button>
         <span id="log-error" class="error" role="alert"></span>
       </div>
-      <span id="config-path"></span>
+      <code id="skill-chip" title="The full operating contract, for you or an agent">slashie --skill</code>
     </footer>
   </main>
 
@@ -152,7 +152,6 @@
     const runtimeDot = document.getElementById("runtime-dot");
     const runtimeText = document.getElementById("runtime-text");
     const configText = document.getElementById("config-text");
-    const configPath = document.getElementById("config-path");
     const openLog = document.getElementById("open-log");
     const editConfig = document.getElementById("edit-config");
     const logError = document.getElementById("log-error");
@@ -163,31 +162,29 @@
         runtimeText.textContent = runtime.status_text;
       } else if (!runtime.polling) {
         runtimeDot.classList.remove("on", "scanning");
-        runtimeText.textContent = "Polling is paused. Enable it from the Slashie menu-bar icon.";
+        runtimeText.textContent = "Paused";
       } else if (runtime.scanning) {
         runtimeDot.classList.add("on", "scanning");
-        runtimeText.textContent = `Polling every ${runtime.poll_interval_secs}s · scanning…`;
+        runtimeText.textContent = `${runtime.poll_interval_secs}s · scanning`;
       } else if (runtime.last_scan_age_secs == null) {
         runtimeDot.classList.add("on");
         runtimeDot.classList.remove("scanning");
-        runtimeText.textContent = `Polling every ${runtime.poll_interval_secs}s · waiting for the first scan…`;
+        runtimeText.textContent = `${runtime.poll_interval_secs}s · first scan soon`;
       } else {
         runtimeDot.classList.add("on");
         runtimeDot.classList.remove("scanning");
-        runtimeText.textContent = `Polling every ${runtime.poll_interval_secs}s · last scan ${runtime.last_scan_age_secs}s ago`;
+        runtimeText.textContent = `${runtime.poll_interval_secs}s · last ${runtime.last_scan_age_secs}s ago`;
       }
     }
 
     function renderSettings(settings) {
-      configPath.textContent = settings.config_path;
       openLog.disabled = !settings.log_available;
       // The mirror shows the file as it is, valid or not; the banner only
       // explains why the runtime is ignoring it.
       configText.textContent = settings.config_text || "(empty)";
       if (settings.config_unparsable) {
         error.textContent =
-          `The configuration at ${settings.config_path} cannot be parsed. ` +
-          "Fix the file and this mirror reloads by itself.";
+          "config.json cannot be parsed. Fix the file and this mirror reloads by itself.";
       } else {
         error.textContent = "";
       }

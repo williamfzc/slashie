@@ -31,8 +31,10 @@ const SPIN_INTERVAL: Duration = Duration::from_millis(100);
 /// The menu-bar icon frames (menu-bar.md "Status item and menu").
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Frame {
-    /// Polling paused: the whole glyph dimmed.
+    /// Polling paused: the whole glyph dimmed, breathing slowly so the
+    /// paused state is legible as alive-but-idle.
     Dimmed,
+    DimmedBright,
     /// The status line speaks (startup, faults, retries): the plain glyph.
     Plain,
     /// Healthy polling between scans: the resting dim dot.
@@ -53,7 +55,13 @@ const SPIN_RADIUS: f64 = 4.0;
 /// loop iterations and advances the spinner while a scan is in flight.
 fn tray_frame(status: &RuntimeStatus, polling: bool, now: Instant, tick: u64) -> Frame {
     if !polling {
-        return Frame::Dimmed;
+        // Three samples (~750 ms) per breath step: clearly slower than the
+        // spinner, so paused never reads as activity.
+        return if (tick / 3).is_multiple_of(2) {
+            Frame::Dimmed
+        } else {
+            Frame::DimmedBright
+        };
     }
     if status_line(status).is_some() {
         return Frame::Plain;
@@ -176,7 +184,8 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     *state.polling_item.lock().unwrap() = Some(polling.clone());
 
     let icon = Image::from_bytes(include_bytes!("assets/tray-template.png"))?;
-    let dimmed_icon = dim_icon(&icon);
+    let dimmed_icon = dim_icon(&icon, 30);
+    let dimmed_bright_icon = dim_icon(&icon, 55);
     let dot_idle_icon = dot_icon_at(&icon, 6, 24, dot_alphas(false));
     let dot_active_icon = dot_icon_at(&icon, 6, 24, dot_alphas(true));
     let spin = spin_frames(&icon);
@@ -242,6 +251,7 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             if frame != last_frame {
                 let next_icon = match frame {
                     Frame::Dimmed => &dimmed_icon,
+                    Frame::DimmedBright => &dimmed_bright_icon,
                     Frame::Plain => &icon,
                     Frame::DotIdle => &dot_idle_icon,
                     Frame::DotActive => &dot_active_icon,
@@ -362,8 +372,8 @@ fn spin_frames(base: &Image<'_>) -> Vec<Image<'static>> {
 }
 
 /// Template icons carry their shape in alpha; dimming it signals paused.
-fn dim_icon(base: &Image<'_>) -> Image<'static> {
-    let dim = |v: u8| ((v as u32 * 45) / 100) as u8;
+fn dim_icon(base: &Image<'_>, level: u32) -> Image<'static> {
+    let dim = |v: u8| ((v as u32 * level) / 100) as u8;
     let rgba: Vec<u8> = base
         .rgba()
         .as_chunks::<4>()
@@ -495,7 +505,6 @@ fn open_settings(app: &AppHandle) {
 struct SettingsPayload {
     config_text: String,
     config_unparsable: bool,
-    config_path: String,
     log_available: bool,
 }
 
@@ -511,7 +520,6 @@ impl SettingsPayload {
         Self {
             config_unparsable: Config::parse(&text).is_err(),
             config_text: text,
-            config_path: path.display().to_string(),
             log_available: home.join("slashie.log").exists(),
         }
     }
@@ -597,9 +605,17 @@ mod tests {
     #[test]
     fn frames_distinguish_paused_fault_and_polling() {
         let now = Instant::now();
-        // Paused dims the glyph regardless of other state.
+        // Paused dims the glyph and breathes, three samples per step.
         assert_eq!(
             tray_frame(&RuntimeStatus::default(), false, now, 0),
+            Frame::Dimmed
+        );
+        assert_eq!(
+            tray_frame(&RuntimeStatus::default(), false, now, 3),
+            Frame::DimmedBright
+        );
+        assert_eq!(
+            tray_frame(&RuntimeStatus::default(), false, now, 6),
             Frame::Dimmed
         );
         // Healthy polling rests with the dim dot.
