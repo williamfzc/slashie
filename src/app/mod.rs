@@ -21,12 +21,9 @@ use tauri::{
 /// empty one (menu-bar.md "Status item and menu").
 const SCAN_FLASH_DURATION: Duration = Duration::from_millis(1500);
 
-/// Sampling cadence of the tray thread while the icon is static.
+/// Sampling cadence of the tray thread; the classifier pairs consecutive
+/// samples so the dot breathes about once a second, quicker in a scan.
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
-
-/// Frame cadence while a scan is in flight; eight spin frames at this rate
-/// make the dot orbit about once a second.
-const SPIN_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The menu-bar icon frames (menu-bar.md "Status item and menu").
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -36,19 +33,15 @@ enum Frame {
     Dimmed,
     /// The status line speaks (startup, faults, retries): the plain glyph.
     Plain,
-    /// Polling on: the dot orbiting the slash, `SPIN_STEPS` per turn.
-    /// Bright while a scan is in flight or just completed, dim between
-    /// scans — the orbit never stops while the switch is on.
-    Spin { step: usize, bright: bool },
+    /// Polling on: the dot beside the slashes breathing — quick while a
+    /// scan is in flight, calm between scans, steady-bright briefly after
+    /// a complete scan. The dot never disappears while the switch is on.
+    Dot { bright: bool },
 }
 
-/// The comet orbit circles the whole glyph: 16 steps per revolution, the
-/// head bright and the tail fading behind it.
-const SPIN_STEPS: usize = 16;
-const SPIN_CENTER: (f64, f64) = (16.0, 16.0);
-const SPIN_RADIUS: f64 = 13.0;
-/// Trail dots behind the head, as alpha scale factors.
-const TRAIL_SCALES: [f64; 3] = [0.55, 0.3, 0.12];
+/// The breathing dot sits in the clear corner beside the slash tails
+/// (verified against the 32x32 template's alpha grid).
+const DOT_POS: (isize, isize) = (24, 24);
 
 /// Classify the icon frame for the current runtime state. `tick` counts
 /// loop iterations and advances the spinner while a scan is in flight.
@@ -59,22 +52,22 @@ fn tray_frame(status: &RuntimeStatus, polling: bool, now: Instant, tick: u64) ->
     if status_line(status).is_some() {
         return Frame::Plain;
     }
-    let step = |samples: u64| ((tick / samples) % SPIN_STEPS as u64) as usize;
     if status.scanning {
-        // Fast orbit: one revolution per second.
-        return Frame::Spin {
-            step: step(1),
-            bright: true,
+        // Quick breath: the scan is felt.
+        return Frame::Dot {
+            bright: tick.is_multiple_of(2),
         };
     }
-    // Between scans the orbit continues, slower and dim: the switch is on
-    // and the poller is alive. A completed scan keeps it bright briefly.
-    let bright = status
+    // A completed scan holds the dot bright briefly, then the calm breath
+    // resumes — the switch is on and the poller is alive.
+    if status
         .last_successful_scan
-        .is_some_and(|scan| now.duration_since(scan) < SCAN_FLASH_DURATION);
-    Frame::Spin {
-        step: step(1),
-        bright,
+        .is_some_and(|scan| now.duration_since(scan) < SCAN_FLASH_DURATION)
+    {
+        return Frame::Dot { bright: true };
+    }
+    Frame::Dot {
+        bright: (tick / 2).is_multiple_of(2),
     }
 }
 
@@ -185,7 +178,7 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
     let icon = Image::from_bytes(include_bytes!("assets/tray-template.png"))?;
     let dimmed_icon = dim_icon(&icon, 40);
-    let (spin_bright, spin_dim) = spin_frames(&icon);
+    let (dot_bright, dot_dim) = dot_icons(&icon);
     // Classify before building so a paused launch never shows the
     // full-brightness glyph for one sampling interval.
     let initial_frame = {
@@ -195,11 +188,11 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let initial_icon = match initial_frame {
         Frame::Dimmed => &dimmed_icon,
         Frame::Plain => &icon,
-        Frame::Spin { bright, .. } => {
+        Frame::Dot { bright } => {
             if bright {
-                &spin_bright[0]
+                &dot_bright
             } else {
-                &spin_dim[0]
+                &dot_dim
             }
         }
     };
@@ -265,11 +258,11 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 let next_icon = match frame {
                     Frame::Dimmed => &dimmed_icon,
                     Frame::Plain => &icon,
-                    Frame::Spin { step, bright } => {
+                    Frame::Dot { bright } => {
                         if bright {
-                            &spin_bright[step]
+                            &dot_bright
                         } else {
-                            &spin_dim[step]
+                            &dot_dim
                         }
                     }
                 };
@@ -313,13 +306,7 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 last_toggleable = toggleable;
             }
-            // Orbit cadence: fast and bright during a scan, slower and dim
-            // between scans; static sampling everywhere else.
-            std::thread::sleep(match frame {
-                Frame::Spin { bright, .. } if bright => SPIN_INTERVAL / 2,
-                Frame::Spin { .. } => SPIN_INTERVAL,
-                _ => SAMPLE_INTERVAL,
-            });
+            std::thread::sleep(SAMPLE_INTERVAL);
         }
     });
     Ok(())
@@ -374,43 +361,13 @@ fn dot_icon_at(base: &Image<'_>, ox: isize, oy: isize, alphas: [[u8; 4]; 4]) -> 
     Image::new_owned(rgba, base.width(), base.height())
 }
 
-/// The comet frames: a bright head with a fading tail circling the glyph.
-/// Two brightness sets — bright (scan in flight or just completed) and dim
-/// (between scans). The orbit never stops while the polling switch is on.
-fn spin_frames(base: &Image<'_>) -> (Vec<Image<'static>>, Vec<Image<'static>>) {
-    let orbit = |bright: bool| {
-        (0..SPIN_STEPS)
-            .map(|step| {
-                // Stamp the head, then the tail fading behind it, each onto
-                // the previous result: the lifetime stays 'static after the
-                // first stamp because dot_icon_at owns its output.
-                let mut frame: Option<Image<'static>> = None;
-                for (offset, scale) in std::iter::once((0u64, 1.0)).chain(
-                    TRAIL_SCALES
-                        .iter()
-                        .enumerate()
-                        .map(|(i, s)| ((i + 1) as u64, *s)),
-                ) {
-                    let angle = ((step as f64 - offset as f64) * std::f64::consts::TAU
-                        / SPIN_STEPS as f64)
-                        .rem_euclid(std::f64::consts::TAU);
-                    let cx = SPIN_CENTER.0 + SPIN_RADIUS * angle.cos();
-                    let cy = SPIN_CENTER.1 + SPIN_RADIUS * angle.sin();
-                    let alphas = dot_alphas(bright)
-                        .map(|row| row.map(|v| ((v as f64 * scale) as u8).max(1)));
-                    let source: &Image<'_> = frame.as_ref().unwrap_or(base);
-                    frame = Some(dot_icon_at(
-                        source,
-                        cx.round() as isize - 1,
-                        cy.round() as isize - 1,
-                        alphas,
-                    ));
-                }
-                frame.expect("the trail loop always stamps the head")
-            })
-            .collect()
-    };
-    (orbit(true), orbit(false))
+/// The breathing dot in its two extremes.
+fn dot_icons(base: &Image<'_>) -> (Image<'static>, Image<'static>) {
+    let (ox, oy) = DOT_POS;
+    (
+        dot_icon_at(base, ox, oy, dot_alphas(true)),
+        dot_icon_at(base, ox, oy, dot_alphas(false)),
+    )
 }
 
 /// Template icons carry their shape in alpha; dimming it signals paused.
@@ -654,77 +611,52 @@ mod tests {
                 Frame::Dimmed
             );
         }
-        // Healthy polling always orbits: slow and dim between scans.
-        assert_eq!(
-            tray_frame(&RuntimeStatus::default(), true, now, 0),
-            Frame::Spin {
-                step: 0,
-                bright: false
-            }
-        );
-        assert_eq!(
-            tray_frame(&RuntimeStatus::default(), true, now, 1),
-            Frame::Spin {
-                step: 1,
-                bright: false
-            }
-        );
-        assert_eq!(
-            tray_frame(&RuntimeStatus::default(), true, now, 16),
-            Frame::Spin {
-                step: 0,
-                bright: false
-            }
-        );
 
-        // A completed scan keeps the orbit bright for a while.
-        let mut status = RuntimeStatus {
-            last_successful_scan: Some(now),
-            ..Default::default()
-        };
+        // Polling on: the dot breathes, one second per cycle.
+        let mut status = RuntimeStatus::default();
         assert_eq!(
             tray_frame(&status, true, now, 0),
-            Frame::Spin {
-                step: 0,
-                bright: true
-            }
+            Frame::Dot { bright: true }
         );
         assert_eq!(
-            tray_frame(&status, true, now + SCAN_FLASH_DURATION, 0),
-            Frame::Spin {
-                step: 0,
-                bright: false
-            }
+            tray_frame(&status, true, now, 2),
+            Frame::Dot { bright: false }
+        );
+        assert_eq!(
+            tray_frame(&status, true, now, 4),
+            Frame::Dot { bright: true }
         );
 
-        // A scan in flight orbits the same path, fast and bright.
+        // A scan in flight quickens the breath.
         status.scanning = true;
         assert_eq!(
             tray_frame(&status, true, now, 0),
-            Frame::Spin {
-                step: 0,
-                bright: true
-            }
+            Frame::Dot { bright: true }
         );
         assert_eq!(
             tray_frame(&status, true, now, 1),
-            Frame::Spin {
-                step: 1,
-                bright: true
-            }
-        );
-        assert_eq!(
-            tray_frame(&status, true, now, 16),
-            Frame::Spin {
-                step: 0,
-                bright: true
-            }
+            Frame::Dot { bright: false }
         );
         assert_eq!(tray_frame(&status, false, now, 0), Frame::Dimmed);
 
-        // The status line carries phases and faults; the dot drops out.
+        // After a complete scan the dot holds bright, then resumes.
         status.scanning = false;
         status.last_successful_scan = Some(now);
+        assert_eq!(
+            tray_frame(&status, true, now, 0),
+            Frame::Dot { bright: true }
+        );
+        assert_eq!(
+            tray_frame(&status, true, now + SCAN_FLASH_DURATION, 0),
+            Frame::Dot { bright: true }
+        );
+        assert_eq!(
+            tray_frame(&status, true, now + SCAN_FLASH_DURATION, 2),
+            Frame::Dot { bright: false }
+        );
+
+        // The status line carries faults; the dot drops out.
+        status.last_successful_scan = None;
         status.phase = Some(Phase::Starting);
         assert_eq!(tray_frame(&status, true, now, 0), Frame::Plain);
         status.phase = Some(Phase::Quitting);
