@@ -6,7 +6,6 @@
 
 use crate::config::Config;
 use crate::runtime::Runtime;
-use crate::settings::{save_settings, SettingsDraft};
 use crate::status::{status_line, RuntimeStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -100,7 +99,7 @@ pub fn run(rt: Arc<Runtime>, shutdown: Arc<AtomicBool>) {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_settings,
-            save_settings_cmd,
+            edit_config,
             open_log,
             get_status,
             report_settings
@@ -459,7 +458,7 @@ fn open_settings(app: &AppHandle) {
                     WebviewUrl::App("index.html".into()),
                 )
                 .title("Slashie Settings")
-                .inner_size(600.0, 520.0)
+                .inner_size(560.0, 430.0)
                 .center()
                 .build()?;
                 let hide_on_close = window.clone();
@@ -489,15 +488,15 @@ fn open_settings(app: &AppHandle) {
 
 // ---- Settings window commands (DESIGN.md: same schema and validator) ----
 
+/// The read-only configuration mirror (menu-bar.md "Settings"): the raw
+/// config.json, verbatim. The window never edits; every change goes through
+/// the route subcommands or the file itself.
 #[derive(serde::Serialize)]
 struct SettingsPayload {
-    draft: SettingsDraft,
-    snapshot: String,
+    config_text: String,
     config_unparsable: bool,
     config_path: String,
     log_available: bool,
-    /// This binary, so the window can name the `route` subcommands' path.
-    cli_path: String,
 }
 
 #[tauri::command]
@@ -508,43 +507,13 @@ fn get_settings(state: State<'_, AppState>) -> SettingsPayload {
 impl SettingsPayload {
     fn load(home: &std::path::Path) -> Self {
         let path = home.join("config.json");
-        let snapshot = std::fs::read_to_string(&path).unwrap_or_default();
-        let config = Config::parse(&snapshot);
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
         Self {
-            config_unparsable: config.is_err(),
-            draft: SettingsDraft::from_config(&config.unwrap_or_default()),
-            snapshot,
+            config_unparsable: Config::parse(&text).is_err(),
+            config_text: text,
             config_path: path.display().to_string(),
             log_available: home.join("slashie.log").exists(),
-            cli_path: std::env::current_exe()
-                .map(|path| path.display().to_string())
-                .unwrap_or_default(),
         }
-    }
-}
-
-#[derive(serde::Serialize)]
-enum SaveReply {
-    Saved,
-    Invalid(Vec<crate::settings::FieldError>),
-    FileChanged,
-    Unparsable(String),
-    Io(String),
-}
-
-#[tauri::command]
-fn save_settings_cmd(
-    state: State<'_, AppState>,
-    snapshot: String,
-    draft: SettingsDraft,
-) -> SaveReply {
-    // If the file changed since the window loaded it, reject the save.
-    match save_settings(&state.rt.home, &snapshot, &draft) {
-        crate::settings::SaveOutcome::Saved => SaveReply::Saved,
-        crate::settings::SaveOutcome::Invalid(e) => SaveReply::Invalid(e),
-        crate::settings::SaveOutcome::FileChanged => SaveReply::FileChanged,
-        crate::settings::SaveOutcome::Unparsable(p) => SaveReply::Unparsable(p),
-        crate::settings::SaveOutcome::Io(m) => SaveReply::Io(m),
     }
 }
 
@@ -559,6 +528,23 @@ fn open_log(state: State<'_, AppState>) -> Result<(), String> {
         .arg(&path)
         .spawn()
         .map_err(|e| format!("cannot open log: {}", e))?;
+    Ok(())
+}
+
+/// Open config.json in the user's default text editor (menu-bar.md
+/// "Settings"): the mirror is read-only, so hand edits happen in the file
+/// itself and apply at the next scan.
+#[tauri::command]
+fn edit_config(state: State<'_, AppState>) -> Result<(), String> {
+    let path = state.rt.home.join("config.json");
+    if !path.exists() {
+        return Err(format!("config not found at {}", path.display()));
+    }
+    std::process::Command::new("/usr/bin/open")
+        .arg("-t")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| format!("cannot open an editor: {}", e))?;
     Ok(())
 }
 

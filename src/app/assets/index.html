@@ -1,5 +1,7 @@
 <!doctype html>
-<!-- Settings view for the macOS host. Edits the draft through Tauri commands. -->
+<!-- Settings view for the macOS host: a read-only mirror of the live
+     configuration. Every edit goes through the slashie CLI; this window
+     reflects config.json and the runtime state as they are. -->
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -35,33 +37,18 @@
     * { box-sizing: border-box; }
     [hidden] { display: none !important; }
     body { margin: 0; background: var(--background); color: var(--ink); }
-    form { display: flex; flex-direction: column; height: 100dvh; }
-    main { flex: 1; overflow: auto; padding: 20px; }
-    fieldset { border: 0; margin: 0; min-inline-size: 0; padding: 0; }
-    h2 { font-size: 14px; margin: 0; }
+    main { display: flex; flex-direction: column; gap: 14px; height: 100dvh; padding: 20px; overflow: auto; }
     p { margin: 0; }
-    button, select, input, textarea { font: inherit; }
-    button, select {
-      min-height: 30px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: var(--surface);
-      color: var(--ink);
-      padding: 4px 10px;
-    }
-    button:enabled, select:enabled, summary { cursor: pointer; }
+    button { font: inherit; min-height: 30px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); padding: 4px 10px; }
+    button:enabled { cursor: pointer; }
     button:enabled:hover { border-color: var(--secondary); }
-    :is(button, select, input, textarea, summary):focus-visible {
-      outline: 2px solid var(--accent);
-      outline-offset: 2px;
-    }
-    :is(button, select, input, textarea):disabled { opacity: .55; }
+    button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    button:disabled { opacity: .55; }
     .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
     .runtime-status {
       display: flex;
       align-items: center;
       gap: 8px;
-      margin-bottom: 18px;
       padding: 10px 12px;
       color: var(--secondary);
       font-size: 12px;
@@ -82,50 +69,26 @@
     @media (prefers-reduced-motion: reduce) {
       #runtime-dot.scanning { animation: none; }
     }
-    .interval, .section-heading {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-    }
-    .interval { padding: 12px; }
-    .interval label { font-size: 14px; font-weight: 600; }
-    .interval select { min-width: 111px; padding-inline: 6px; }
-    .routes { margin-top: 18px; }
-    .section-heading { margin-bottom: 8px; }
-    .route-card { padding: 0 8px; }
-    table { width: 100%; border-collapse: collapse; table-layout: fixed; text-align: start; }
-    .prefix-col { width: 120px; }
-    .action-col { width: 75px; }
-    th { padding: 6px; color: var(--secondary); font-size: 12px; font-weight: 600; text-align: left; }
-    td { border-top: 1px solid var(--line); padding: 5px 6px; vertical-align: top; }
-    td:last-child { text-align: right; }
-    .route-input {
-      display: block;
-      width: 100%;
-      min-height: 30px;
-      color: var(--ink);
-      background: var(--background);
-      border: 1px solid var(--line);
-      border-radius: 5px;
-      padding: 5px 7px;
-      font: 12px/18px ui-monospace, Menlo, monospace;
-    }
-    textarea.route-input { resize: none; field-sizing: content; }
-    .empty-row { color: var(--secondary); padding: 10px 6px; text-align: left; }
-    details { margin-top: 9px; color: var(--secondary); font-size: 12px; }
-    details p { margin: 6px 0 0 13px; }
-    .copy-result { color: var(--secondary); }
-    .copy-result.failed { color: var(--error); }
-    details pre {
-      margin: 6px 0 0 13px;
+    .config { padding: 10px 12px; }
+    .config label { font-size: 12px; font-weight: 600; color: var(--secondary); }
+    #config-text {
+      margin: 8px 0 0;
+      max-height: 240px;
+      overflow: auto;
       padding: 8px;
       background: var(--background);
       border: 1px solid var(--line);
       border-radius: 5px;
       font: 11px/16px ui-monospace, Menlo, monospace;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
+      white-space: pre;
+      user-select: all;
+    }
+    .hint { color: var(--secondary); font-size: 12px; }
+    .hint code {
+      padding: 1px 5px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 4px;
       user-select: all;
     }
     footer {
@@ -133,104 +96,51 @@
       justify-content: space-between;
       align-items: center;
       gap: 14px;
-      min-height: 60px;
+      margin-top: auto;
       border-top: 1px solid var(--line);
-      padding: 10px 20px;
+      padding: 10px 0 0;
     }
-    .footer-group { display: flex; align-items: center; gap: 10px; }
-    .footer-group button { flex-shrink: 0; }
-    #status { color: var(--secondary); font-size: 12px; text-align: right; }
-    #save { min-width: 68px; font-weight: 600; }
-    #save:enabled { background: #005fce; border-color: #005fce; color: #fff; }
-    #save:enabled:hover { background: #004fae; }
+    #config-path { color: var(--secondary); font-size: 11px; overflow-wrap: anywhere; user-select: all; }
     .error { color: var(--error); font-size: 12px; overflow-wrap: anywhere; }
     #error:not(:empty) {
       border: 1px solid var(--error);
       border-radius: 8px;
-      margin-bottom: 12px;
       padding: 8px 10px;
     }
-    [aria-invalid="true"] { border-color: var(--error); }
-    .field-error:not(:empty) { display: block; margin-top: 3px; }
   </style>
 </head>
 <body>
-  <form>
-    <main>
-      <p id="error" class="error" role="alert"></p>
-      <!-- Read-only runtime status; intentionally not a live region so the
-           one-second refresh stays quiet for screen readers. -->
-      <p id="runtime-status" class="card runtime-status">
-        <span id="runtime-dot" aria-hidden="true"></span>
-        <span id="runtime-text">Checking the poller…</span>
-      </p>
-      <fieldset id="editor" aria-label="Configuration" disabled>
-        <div class="interval card">
-          <label for="interval">Polling interval</label>
-          <div>
-            <select id="interval" aria-describedby="interval-error">
-              <option value="" hidden>—</option>
-              <option value="10">10 seconds</option>
-              <option value="20">20 seconds</option>
-              <option value="30">30 seconds</option>
-              <option value="60">60 seconds</option>
-            </select>
-            <span id="interval-error" class="error field-error"></span>
-          </div>
-        </div>
+  <main>
+    <p id="error" class="error" role="alert"></p>
+    <!-- Read-only runtime status; intentionally not a live region so the
+         one-second refresh stays quiet for screen readers. -->
+    <p id="runtime-status" class="card runtime-status">
+      <span id="runtime-dot" aria-hidden="true"></span>
+      <span id="runtime-text">Checking the poller…</span>
+    </p>
 
-        <section class="routes" aria-labelledby="routes-title">
-          <div class="section-heading">
-            <h2 id="routes-title">Routes</h2>
-            <button id="add-route" type="button">Add Route</button>
-          </div>
-          <div class="route-card card">
-            <table aria-labelledby="routes-title">
-              <colgroup>
-                <col class="prefix-col" />
-                <col />
-                <col class="action-col" />
-              </colgroup>
-              <thead>
-                <tr><th scope="col">Prefix</th><th scope="col">Command</th><th scope="col" aria-label="Actions"></th></tr>
-              </thead>
-              <tbody id="routes"></tbody>
-              <tbody id="empty-routes" hidden>
-                <tr><td colspan="3" class="empty-row">No routes configured.</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <details class="agent-help">
-            <summary>Configure with an agent</summary>
-            <p>Any local agent can edit these routes for you with the slashie CLI while Slashie runs. Review its changes; they apply at the next scan.</p>
-            <p>
-              <button id="copy-agent-prompt" type="button">Copy agent prompt</button>
-              <span id="copy-result" class="copy-result" role="status"></span>
-            </p>
-            <pre id="agent-example"></pre>
-          </details>
-        </section>
-      </fieldset>
+    <section class="card config" aria-labelledby="config-title">
+      <label id="config-title">config.json — live</label>
+      <pre id="config-text" tabindex="0" aria-label="Configuration file contents"></pre>
+    </section>
 
-      <details>
-        <summary>Command variables</summary>
-        <p><code>"$SLASHIE_ARGS"</code> passes the text after the prefix. <code>"$SLASHIE_PROMPT"</code> includes that text and the message source.</p>
-        <p>For example, use <code>codex exec "$SLASHIE_PROMPT"</code>. A fixed command like <code>echo pong</code> needs no input. <code>$SLASHIE_PROMPT</code> appends a source block with the message ID, chat, topic (when in one), and sender.</p>
-        <p>A route with <code>"session": "chat"</code> in config.json keeps one agent session per conversation (chat or topic) and passes <code>$SLASHIE_CONTINUE</code>.</p>
-      </details>
-    </main>
+    <p class="hint">
+      This window mirrors <code>config.json</code> as it is. Edit it here with
+      <code>Edit Config</code>, or have an agent use the CLI:
+      <code>slashie route add &lt;PREFIX&gt; --cmd &lt;COMMAND&gt;</code> ·
+      <code>slashie route remove &lt;PREFIX&gt;</code>. Changes apply at the
+      next scan; the full contract is <code>slashie --skill</code>.
+    </p>
 
     <footer>
       <div class="footer-group">
+        <button id="edit-config" type="button">Edit Config</button>
         <button id="open-log" type="button" disabled>Open Log</button>
         <span id="log-error" class="error" role="alert"></span>
       </div>
-      <div class="footer-group">
-        <span id="status" role="status">Loading settings…</span>
-        <button id="save" type="submit" disabled>Save</button>
-      </div>
+      <span id="config-path"></span>
     </footer>
-  </form>
+  </main>
 
   <script>
     // `__TAURI__` requires `withGlobalTauri`; the internals bridge is always
@@ -238,291 +148,14 @@
     const invoke =
       window.__TAURI__?.core?.invoke?.bind(window.__TAURI__.core) ??
       window.__TAURI_INTERNALS__?.invoke?.bind(window.__TAURI_INTERNALS__);
-    const form = document.querySelector("form");
-    const editor = document.getElementById("editor");
-    const interval = document.getElementById("interval");
-    const routes = document.getElementById("routes");
-    const emptyRoutes = document.getElementById("empty-routes");
-    const addRoute = document.getElementById("add-route");
-    const openLog = document.getElementById("open-log");
-    const logError = document.getElementById("log-error");
-    const save = document.getElementById("save");
-    const status = document.getElementById("status");
     const error = document.getElementById("error");
-    const agentExample = document.getElementById("agent-example");
-    const copyAgentPrompt = document.getElementById("copy-agent-prompt");
-    const copyResult = document.getElementById("copy-result");
-
-    let snapshot = null;
-    let baseline = "";
-    let busy = false;
-    let nextRouteId = 0;
-    let cliPath = "";
-
-    function routeRow(prefix, cmd, rowId = null) {
-      const row = routes.insertRow();
-      if (rowId != null) row.dataset.rowId = String(rowId);
-      const routeId = ++nextRouteId;
-      const prefixInput = document.createElement("input");
-      prefixInput.value = prefix;
-      prefixInput.placeholder = "/prefix";
-      prefixInput.spellcheck = false;
-      prefixInput.autocapitalize = "off";
-      const commandInput = document.createElement("textarea");
-      commandInput.value = cmd;
-      commandInput.placeholder = "echo pong";
-      commandInput.rows = 1;
-      commandInput.wrap = "off";
-      commandInput.spellcheck = false;
-      commandInput.autocapitalize = "off";
-
-      for (const [name, control] of [["prefix", prefixInput], ["cmd", commandInput]]) {
-        const fieldError = document.createElement("span");
-        fieldError.id = `route-${routeId}-${name}-error`;
-        fieldError.className = "error field-error";
-        control.className = "route-input";
-        control.setAttribute("aria-describedby", fieldError.id);
-        row.insertCell().append(control, fieldError);
-      }
-
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.textContent = "Remove";
-      remove.onclick = () => {
-        const neighbor = row.nextElementSibling ?? row.previousElementSibling;
-        row.remove();
-        labelRoutes();
-        edited();
-        (neighbor?.querySelector("input") ?? addRoute).focus();
-      };
-      row.insertCell().append(remove);
-      return prefixInput;
-    }
-
-    function labelRoutes() {
-      emptyRoutes.hidden = routes.rows.length !== 0;
-      [...routes.rows].forEach((row, index) => {
-        row.querySelector("input").setAttribute("aria-label", `Prefix, route ${index + 1}`);
-        row.querySelector("textarea").setAttribute("aria-label", `Command, route ${index + 1}`);
-        row.querySelector("button").setAttribute("aria-label", `Remove route ${index + 1}`);
-      });
-    }
-
-    // Compare route content only: rowId is bookkeeping, not a user edit.
-    function draftKey(draft) {
-      return JSON.stringify({
-        pollInterval: draft.pollInterval,
-        routes: draft.routes.map(({ prefix, cmd }) => ({ prefix, cmd })),
-      });
-    }
-
-    function collectDraft() {
-      return {
-        pollInterval: Number(interval.value),
-        routes: [...routes.rows].map((row) => ({
-          prefix: row.querySelector("input").value,
-          cmd: row.querySelector("textarea").value,
-          rowId: row.dataset.rowId != null ? Number(row.dataset.rowId) : null,
-        })),
-      };
-    }
-
-    function syncControls() {
-      editor.disabled = snapshot === null || busy;
-      save.disabled = editor.disabled || draftKey(collectDraft()) === baseline;
-    }
-
-    function edited() {
-      error.textContent = "";
-      for (const field of editor.querySelectorAll('[aria-invalid="true"]')) {
-        document.getElementById(field.getAttribute("aria-describedby")).textContent = "";
-        field.removeAttribute("aria-invalid");
-      }
-      syncControls();
-      status.textContent = save.disabled ? "" : "Unsaved changes";
-    }
-
-    function markErrors(errors) {
-      let first;
-      for (const issue of errors) {
-        const field = issue.field === "poll_interval"
-          ? interval
-          : routes.rows[issue.row]?.querySelector(issue.field === "cmd" ? "textarea" : "input");
-        if (!field) continue;
-        field.setAttribute("aria-invalid", "true");
-        document.getElementById(field.getAttribute("aria-describedby")).textContent = issue.message;
-        first ??= field;
-      }
-      error.textContent = first ? "Review the highlighted fields." : "The configuration is invalid.";
-      return first;
-    }
-
-    async function readSettings() {
-      if (typeof invoke !== "function") throw new Error("The app connection is unavailable.");
-      const settings = await invoke("get_settings");
-      openLog.disabled = !settings.log_available;
-      cliPath = typeof settings.cli_path === "string" ? settings.cli_path : "";
-      agentExample.textContent =
-        `${cliPath || "slashie"} route add /deploy --cmd 'cd ~/app && ./deploy.sh "$SLASHIE_ARGS"' --timeout 120`;
-      if (settings.config_unparsable) {
-        throw new Error(`Repair the configuration at ${settings.config_path}, then reopen Settings.`);
-      }
-      if (typeof settings.snapshot !== "string" || !settings.snapshot) {
-        throw new Error("The configuration snapshot is unavailable.");
-      }
-      return settings;
-    }
-
-    function report(message) {
-      try {
-        Promise.resolve(invoke?.("report_settings", { message })).catch(() => {});
-      } catch {
-        // Diagnostics must never change the window's behavior.
-      }
-    }
-
-    // The agent-guidance prompt (menu-bar.md "Settings"): a fixed template
-    // naming the running CLI path; `--skill` carries the operating rules.
-    function agentPrompt() {
-      const cli = cliPath || "slashie";
-      return [
-        "You can configure my Slashie routes. Slashie runs slash commands from Feishu on this machine.",
-        `Run \`${cli} --skill\` first; it is the operating manual. Follow it.`,
-        "Ask me what I want to automate before changing anything.",
-        "Show me the final route list when you are done.",
-      ].join("\n");
-    }
-
-    async function copyText(text) {
-      try {
-        await navigator.clipboard.writeText(text);
-        return true;
-      } catch {
-        // WKWebView can reject the async clipboard API; fall back.
-        const holder = document.createElement("textarea");
-        holder.value = text;
-        holder.setAttribute("readonly", "");
-        document.body.append(holder);
-        holder.select();
-        let copied = false;
-        try {
-          copied = document.execCommand("copy");
-        } catch {
-          copied = false;
-        }
-        holder.remove();
-        return copied;
-      }
-    }
-
-    copyAgentPrompt.onclick = async () => {
-      const prompt = agentPrompt();
-      const copied = await copyText(prompt);
-      copyResult.classList.toggle("failed", !copied);
-      copyResult.textContent = copied
-        ? "Copied."
-        : "Could not copy. The prompt is shown below; select it.";
-      if (!copied) agentExample.textContent = prompt;
-    };
-
-    async function load() {
-      try {
-        const settings = await readSettings();
-        interval.value = String(settings.draft.pollInterval);
-        if (!interval.value || !Array.isArray(settings.draft.routes)) {
-          throw new Error("The app returned an invalid configuration.");
-        }
-        settings.draft.routes.forEach((route, i) => routeRow(route.prefix, route.cmd, i));
-        labelRoutes();
-        baseline = draftKey(collectDraft());
-        snapshot = settings.snapshot;
-        report(`loaded ${settings.draft.routes.length} routes`);
-      } catch (failure) {
-        interval.value = "";
-        routes.replaceChildren();
-        error.textContent = `Could not load settings. ${failure.message ?? failure}`;
-        report(`load failed: ${failure.message ?? failure}`);
-      } finally {
-        status.textContent = "";
-        syncControls();
-      }
-    }
-
-    addRoute.onclick = () => {
-      const prefixInput = routeRow("", "");
-      labelRoutes();
-      edited();
-      prefixInput.focus();
-    };
-    editor.oninput = edited;
-
-    openLog.onclick = async () => {
-      logError.textContent = "";
-      try {
-        await invoke("open_log");
-      } catch (failure) {
-        logError.textContent = `Could not open the log. ${failure.message ?? failure}`;
-      }
-    };
-
-    form.onsubmit = async (event) => {
-      event.preventDefault();
-      if (save.disabled) return;
-      const draft = collectDraft();
-      busy = true;
-      error.textContent = "";
-      status.textContent = "Saving…";
-      syncControls();
-      let invalidField;
-      try {
-        const result = await invoke("save_settings_cmd", { snapshot, draft });
-        if (result === "Saved") {
-          snapshot = null;
-          baseline = draftKey(draft);
-          status.textContent = `Saved. Slashie picks it up within about ${draft.pollInterval}s.`;
-          try {
-            const settings = await readSettings();
-            if (draftKey(settings.draft) !== baseline) {
-              throw new Error("The configuration changed after saving.");
-            }
-            snapshot = settings.snapshot;
-            // The saved file order equals the draft order; re-anchor each
-            // row's identity so later saves in this window session keep
-            // preserving the right route's hidden options.
-            settings.draft.routes.forEach((route, i) => {
-              if (routes.rows[i]) routes.rows[i].dataset.rowId = String(i);
-            });
-          } catch (failure) {
-            error.textContent = `${failure.message ?? failure} Reopen Settings to continue editing.`;
-          }
-        } else {
-          status.textContent = "Unsaved changes";
-          if (result === "FileChanged") {
-            snapshot = null;
-            error.textContent = "The configuration file changed. Reopen Settings to load the latest values.";
-          } else if (result?.Invalid) {
-            invalidField = markErrors(result.Invalid);
-          } else if (result?.Unparsable) {
-            snapshot = null;
-            error.textContent = `Repair the configuration at ${result.Unparsable}, then reopen Settings.`;
-          } else {
-            error.textContent = `Could not save settings. ${result?.Io ?? "The app returned an unexpected response."}`;
-          }
-        }
-      } catch (failure) {
-        status.textContent = "Unsaved changes";
-        error.textContent = `Could not save settings. ${failure.message ?? failure}`;
-      } finally {
-        busy = false;
-        syncControls();
-        invalidField?.focus();
-      }
-    };
-
-    // Runtime status mirrors the menu bar (menu-bar.md). Skipped while the
-    // window is hidden; the page reloads when the window reopens.
     const runtimeDot = document.getElementById("runtime-dot");
     const runtimeText = document.getElementById("runtime-text");
+    const configText = document.getElementById("config-text");
+    const configPath = document.getElementById("config-path");
+    const openLog = document.getElementById("open-log");
+    const editConfig = document.getElementById("edit-config");
+    const logError = document.getElementById("log-error");
 
     function renderRuntimeStatus(runtime) {
       if (runtime.status_text) {
@@ -545,19 +178,55 @@
       }
     }
 
-    async function pollRuntimeStatus() {
+    function renderSettings(settings) {
+      configPath.textContent = settings.config_path;
+      openLog.disabled = !settings.log_available;
+      // The mirror shows the file as it is, valid or not; the banner only
+      // explains why the runtime is ignoring it.
+      configText.textContent = settings.config_text || "(empty)";
+      if (settings.config_unparsable) {
+        error.textContent =
+          `The configuration at ${settings.config_path} cannot be parsed. ` +
+          "Fix the file and this mirror reloads by itself.";
+      } else {
+        error.textContent = "";
+      }
+    }
+
+    async function refresh() {
       if (document.hidden || typeof invoke !== "function") return;
       try {
-        renderRuntimeStatus(await invoke("get_status"));
+        const [runtime, settings] = await Promise.all([
+          invoke("get_status"),
+          invoke("get_settings"),
+        ]);
+        renderRuntimeStatus(runtime);
+        renderSettings(settings);
       } catch (failure) {
         runtimeDot.classList.remove("on", "scanning");
         runtimeText.textContent = `Status unavailable. ${failure.message ?? failure}`;
       }
     }
-    setInterval(pollRuntimeStatus, 1000);
-    pollRuntimeStatus();
+    setInterval(refresh, 1000);
+    refresh();
 
-    load();
+    openLog.onclick = async () => {
+      logError.textContent = "";
+      try {
+        await invoke("open_log");
+      } catch (failure) {
+        logError.textContent = `Could not open the log. ${failure.message ?? failure}`;
+      }
+    };
+
+    editConfig.onclick = async () => {
+      logError.textContent = "";
+      try {
+        await invoke("edit_config");
+      } catch (failure) {
+        logError.textContent = `Could not open an editor. ${failure.message ?? failure}`;
+      }
+    };
   </script>
 </body>
 </html>

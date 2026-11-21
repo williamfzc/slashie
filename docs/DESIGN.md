@@ -15,7 +15,7 @@ Use one Rust package and one in-process runtime. Both launch modes share configu
 | Owner | Responsibility |
 | --- | --- |
 | `src/main.rs` | Parse arguments, acquire the lock, and start the selected host. |
-| `src/app` | Run Tauri on the macOS main thread. Render runtime status, submit controls, and host Settings. |
+| `src/app` | Run Tauri on the macOS main thread. Render runtime status, submit controls, and host the read-only Settings mirror. |
 | `src/runtime` | Coordinate scans, claims, and per-conversation mailboxes. Own private storage and process execution. |
 | `src/transport.rs` | Define the `Channel` boundary, `ConversationKey`, the message shape, and the fixture channel. |
 | `src/lark.rs` | Implement the Feishu channel: CLI process, search, details, reaction, reply, and identity. |
@@ -141,7 +141,7 @@ On initial setup, the stock configuration includes `/ping` (replies `pong`), `/p
 | `app.lock` | Instance ownership via a held descriptor. |
 | `slashie.log` | Timestamps, IDs, durations, and outcomes. Rotate at 2 MiB and keep one previous log. |
 
-Settings and headless use the same configuration schema and validator. Save atomically and preserve fields the window does not edit. If the file changed since the window loaded it, reject the save and ask the user to reopen Settings. The runtime applies the saved configuration at its next scan; only a changed `lark_cli` still requires a restart.
+The Settings window mirrors `config.json` verbatim and offers no editing; every change goes through the route subcommands above or the file itself (`Edit Config` opens it in the system editor). All paths share this schema and validator, and the runtime applies changes at its next scan; only a changed `lark_cli` still requires a restart.
 
 Manage routes offline through the CLI: `slashie route list` prints the route table as JSON, `slashie route add <PREFIX> --cmd <COMMAND> [--dir <PATH>] [--timeout <SECS>] [--session chat]` adds one route, and `slashie route remove <PREFIX>` removes it. `slashie --skill` prints this operating contract as a SKILL.md-style document, so any local agent that discovers the binary can teach itself how to operate Slashie. These subcommands run before the instance lock, so they work while the app is running and never trigger the second-instance alert. They reuse the schema and validator, validate the whole file before writing atomically, and refuse to edit an unparsable configuration. This is the interface agents use to configure routes on the user's behalf; the runtime applies the saved file at its next scan.
 

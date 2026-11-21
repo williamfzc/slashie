@@ -10,10 +10,6 @@ mod lock;
 mod logging;
 mod mailbox;
 mod runtime;
-// Settings draft handling is exercised by the Settings window (tray build);
-// the headless artifact compiles it so both builds share one validator.
-#[allow(dead_code)]
-mod settings;
 mod state;
 // The status copy table is consumed by the menu bar (tray build); the
 // headless artifact compiles it so both builds share one copy mapping.
