@@ -44,12 +44,10 @@
     button:enabled:hover { border-color: var(--secondary); }
     button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     button:disabled { opacity: .55; }
-    .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
     .runtime-status {
       display: flex;
       align-items: center;
       gap: 8px;
-      padding: 10px 12px;
       color: var(--secondary);
       font-size: 12px;
     }
@@ -69,16 +67,17 @@
     @media (prefers-reduced-motion: reduce) {
       #runtime-dot.scanning { animation: none; }
     }
-    .config { padding: 10px 12px; }
-    .config label { font-size: 12px; font-weight: 600; color: var(--secondary); }
+    .config label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--secondary);
+      margin-bottom: 6px;
+    }
     #config-text {
-      margin: 8px 0 0;
+      margin: 0;
       max-height: 240px;
       overflow: auto;
-      padding: 8px;
-      background: var(--background);
-      border: 1px solid var(--line);
-      border-radius: 5px;
       font: 11px/16px ui-monospace, Menlo, monospace;
       white-space: pre;
       user-select: all;
@@ -101,10 +100,6 @@
       padding: 10px 0 0;
     }
     #skill-chip {
-      padding: 3px 8px;
-      background: var(--surface);
-      border: 1px solid var(--line);
-      border-radius: 5px;
       font: 11px/16px ui-monospace, Menlo, monospace;
       color: var(--secondary);
       user-select: all;
@@ -122,13 +117,13 @@
     <p id="error" class="error" role="alert"></p>
     <!-- Read-only runtime status; intentionally not a live region so the
          one-second refresh stays quiet for screen readers. -->
-    <p id="runtime-status" class="card runtime-status">
+    <p id="runtime-status" class="runtime-status">
       <span id="runtime-dot" aria-hidden="true"></span>
       <span id="runtime-text">Checking the poller…</span>
     </p>
 
-    <section class="card config" aria-labelledby="config-title">
-      <label id="config-title">config.json — live</label>
+    <section class="config" aria-labelledby="config-title">
+      <label id="config-title">config.json</label>
       <pre id="config-text" tabindex="0" aria-label="Configuration file contents"></pre>
     </section>
 

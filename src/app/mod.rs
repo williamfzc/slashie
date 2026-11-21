@@ -164,8 +164,14 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         false,
         None::<&str>,
     )?;
-    let polling =
-        CheckMenuItem::with_id(&app, "polling", "Polling", true, polling_now, None::<&str>)?;
+    let polling = CheckMenuItem::with_id(
+        &app,
+        "polling",
+        polling_title(polling_now),
+        true,
+        polling_now,
+        None::<&str>,
+    )?;
     let settings_item = MenuItem::with_id(&app, "settings", "Settings…", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(&app)?;
     let quit = MenuItem::with_id(&app, "quit", "Quit Slashie", true, None::<&str>)?;
@@ -290,7 +296,11 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 last_text = text;
             }
             if polling_now != last_polling {
-                if polling.set_checked(polling_now).is_err() {
+                if polling
+                    .set_checked(polling_now)
+                    .and_then(|()| polling.set_text(polling_title(polling_now)))
+                    .is_err()
+                {
                     return;
                 }
                 last_polling = polling_now;
@@ -383,6 +393,16 @@ fn dim_icon(base: &Image<'_>, level: u32) -> Image<'static> {
     Image::new_owned(rgba, base.width(), base.height())
 }
 
+/// The menu item names its state in the title; the native checkmark rides
+/// along when it renders.
+fn polling_title(on: bool) -> &'static str {
+    if on {
+        "Polling: On"
+    } else {
+        "Polling: Off"
+    }
+}
+
 fn handle_menu_event(app: &AppHandle, id: &str) {
     let state: tauri::State<AppState> = app.state();
     match id {
@@ -411,12 +431,14 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
                 let _ = app_for_task.run_on_main_thread(move || {
                     if let Some(item) = polling_item {
                         let _ = item.set_enabled(!rt_for_finish.is_intake_blocked());
-                        // The checkmark reflects the saved setting even when
-                        // an enabled poller is retrying.
+                        // The title and checkmark reflect the saved setting
+                        // even when an enabled poller is retrying.
                         let _ = item.set_checked(saved_now);
+                        let _ = item.set_text(polling_title(saved_now));
                         if result.is_err() {
-                            // Restore the previous checkmark on write failure.
+                            // Restore the previous state on write failure.
                             let _ = item.set_checked(!desired);
+                            let _ = item.set_text(polling_title(!desired));
                         }
                     }
                     rt_for_finish.refresh_status();
