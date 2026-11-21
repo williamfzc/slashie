@@ -31,19 +31,15 @@ const SPIN_INTERVAL: Duration = Duration::from_millis(100);
 /// The menu-bar icon frames (menu-bar.md "Status item and menu").
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Frame {
-    /// Polling paused: the whole glyph dimmed, breathing slowly so the
-    /// paused state is legible as alive-but-idle.
+    /// Polling paused: the whole glyph dimmed, completely still — motion
+    /// belongs to the switch being on, stillness to it being off.
     Dimmed,
-    DimmedBright,
     /// The status line speaks (startup, faults, retries): the plain glyph.
     Plain,
     /// Polling on: the dot orbiting the slash, `SPIN_STEPS` per turn.
     /// Bright while a scan is in flight or just completed, dim between
     /// scans — the orbit never stops while the switch is on.
-    Spin {
-        step: usize,
-        bright: bool,
-    },
+    Spin { step: usize, bright: bool },
 }
 
 /// The comet orbit circles the whole glyph: 16 steps per revolution, the
@@ -58,13 +54,7 @@ const TRAIL_SCALES: [f64; 3] = [0.55, 0.3, 0.12];
 /// loop iterations and advances the spinner while a scan is in flight.
 fn tray_frame(status: &RuntimeStatus, polling: bool, now: Instant, tick: u64) -> Frame {
     if !polling {
-        // Three samples (~750 ms) per breath step: clearly slower than the
-        // orbit, so paused never reads as activity.
-        return if (tick / 3).is_multiple_of(2) {
-            Frame::Dimmed
-        } else {
-            Frame::DimmedBright
-        };
+        return Frame::Dimmed;
     }
     if status_line(status).is_some() {
         return Frame::Plain;
@@ -194,8 +184,7 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     *state.polling_item.lock().unwrap() = Some(polling.clone());
 
     let icon = Image::from_bytes(include_bytes!("assets/tray-template.png"))?;
-    let dimmed_icon = dim_icon(&icon, 30);
-    let dimmed_bright_icon = dim_icon(&icon, 55);
+    let dimmed_icon = dim_icon(&icon, 40);
     let (spin_bright, spin_dim) = spin_frames(&icon);
     let tray = TrayIconBuilder::with_id("slashie-tray")
         .icon(icon.clone())
@@ -259,7 +248,6 @@ fn build_tray(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             if frame != last_frame {
                 let next_icon = match frame {
                     Frame::Dimmed => &dimmed_icon,
-                    Frame::DimmedBright => &dimmed_bright_icon,
                     Frame::Plain => &icon,
                     Frame::Spin { step, bright } => {
                         if bright {
@@ -641,19 +629,13 @@ mod tests {
     #[test]
     fn frames_distinguish_paused_fault_and_polling() {
         let now = Instant::now();
-        // Paused dims the glyph and breathes, three samples per step.
-        assert_eq!(
-            tray_frame(&RuntimeStatus::default(), false, now, 0),
-            Frame::Dimmed
-        );
-        assert_eq!(
-            tray_frame(&RuntimeStatus::default(), false, now, 3),
-            Frame::DimmedBright
-        );
-        assert_eq!(
-            tray_frame(&RuntimeStatus::default(), false, now, 6),
-            Frame::Dimmed
-        );
+        // Paused dims the glyph, completely still at any tick.
+        for tick in [0, 3, 6, 9] {
+            assert_eq!(
+                tray_frame(&RuntimeStatus::default(), false, now, tick),
+                Frame::Dimmed
+            );
+        }
         // Healthy polling always orbits: slow and dim between scans.
         assert_eq!(
             tray_frame(&RuntimeStatus::default(), true, now, 0),

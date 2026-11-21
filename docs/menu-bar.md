@@ -14,7 +14,7 @@ Use one fixed-size `/` template icon with the accessible name `Slashie`. macOS s
 
 | State | Icon |
 | --- | --- |
-| Polling paused | The whole glyph dimmed, breathing slowly — alive but idle. |
+| Polling paused | The whole glyph dimmed, completely still. |
 | Startup, shutdown, a fault, or a retry (any state with a status line) | The plain glyph; the read-only line carries the detail. |
 | Polling healthy | A comet — a bright dot with a fading tail — circling the whole glyph, never stopping while the switch is on: dim and calm between scans, bright and twice as fast while a scan is in flight, staying bright for about a second and a half after a complete scan, including an empty one. |
 
@@ -63,7 +63,7 @@ The window is a mirror of `config.json`, shown verbatim — not an editor. Edits
 
 - From Finder, check the native menu in light and dark appearances. Verify keyboard navigation, Escape dismissal, and VoiceOver reading `Polling` and its checked state.
 - Launch both a bundled and an unbundled dev build and verify that neither shows a Dock icon or a Cmd+Tab entry while the tray item stays available.
-- Verify the dimmed glyph breathing slowly while polling is paused, and the comet orbiting continuously while it is on: calm and dim between scans, bright and fast during a scan, staying bright briefly after a scan completes (including an empty one). Verify the plain glyph, without the comet, during startup, scan failure, retry, and shutdown, and confirm the icon and neighboring items stay in place throughout.
+- Verify the dimmed glyph completely still while polling is off, and the comet orbiting continuously while it is on: calm and dim between scans, bright and fast during a scan, staying bright briefly after a scan completes (including an empty one). Verify the plain glyph, without the comet, during startup, scan failure, retry, and shutdown, and confirm the icon and neighboring items stay in place throughout. The motion must match the switch: nothing animates while polling is off.
 - Verify the frames read at a glance in light and dark appearances and that the dot is visible without relying on color alone.
 - Turn polling off during a command and verify the [pause behavior](product.md#pause-and-recovery). Exercise backoff, failed setting writes, and an uncertain reply. Confirm normal states use the checkmark alone.
 - Open Settings while polling and verify the runtime status line shows the interval and scan age, switches to the breathing dot while a scan runs, and shows the paused copy when polling is off. Verify it carries the status-line copy during a fault, and that the dot does not animate when reduced motion is set.
