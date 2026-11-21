@@ -78,9 +78,9 @@ jobs:
       - name: Install tauri-cli (pinned, prebuilt via npm)
         run: |
           npm install -g @tauri-apps/cli@2.12.5
-          cargo tauri --version
+          tauri --version
       - name: Bundle the .app
-        run: cargo tauri build --features tray --bundles app
+        run: tauri build --features tray --bundles app
       - name: Upload the app bundle
         uses: actions/upload-artifact@v4
         with:
