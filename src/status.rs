@@ -15,10 +15,10 @@ pub struct RuntimeStatus {
     pub finishing_accepted: bool,
     /// Polling is retrying a transient failure.
     pub retrying: Option<RetryKind>,
-    /// Monotonic time of the last complete scan for the menu-bar pulse.
+    /// Monotonic time of the last complete scan for the tray brightness.
     #[serde(skip)]
     pub last_successful_scan: Option<std::time::Instant>,
-    /// A scan is in flight right now (drives the menu-bar breathing dot).
+    /// A scan is in flight right now (quicken the tray breath).
     #[serde(skip)]
     pub scanning: bool,
     /// Starting or shutting down.

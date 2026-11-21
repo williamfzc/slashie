@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-pub const DEFAULT_POLL_INTERVAL: u64 = 20;
+pub const DEFAULT_POLL_INTERVAL: u64 = 10;
 pub const ALLOWED_POLL_INTERVALS: [u64; 4] = [10, 20, 30, 60];
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// System dirs plus the common Homebrew prefixes, so the stock agent
@@ -268,7 +268,7 @@ mod tests {
             .collect();
         assert_eq!(prefixes, ["/ping", "/pi", "/claude", "/codex"]);
         assert_eq!(cfg.routes[0].cmd, "echo pong");
-        assert_eq!(cfg.poll_interval, 20);
+        assert_eq!(cfg.poll_interval, DEFAULT_POLL_INTERVAL);
     }
 
     #[test]

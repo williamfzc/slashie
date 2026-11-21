@@ -15,7 +15,7 @@ Use one fixed-size `/` template icon with the accessible name `Slashie`. macOS s
 | State | Icon |
 | --- | --- |
 | Polling paused | The whole glyph dimmed, completely still. |
-| Shutdown, a fault, or a retry — any state with a status line while polling is on | The plain glyph; the read-only line carries the detail. |
+| Shutdown, a fault, or a retry — any state with a status line while polling is on | The plain glyph; the read-only line carries the detail. A scan in flight breathes up to full brightness and back within half a second, never a snap. |
 | Polling healthy | The whole glyph breathing smoothly on a one-second cycle — quicker while a scan is in flight, holding full brightness for about a second and a half after a complete scan, including an empty one. It never goes fully dark while the switch is on. |
 
 A primary click or keyboard activation opens the menu. This is the enabled state:
@@ -54,7 +54,7 @@ The window is a mirror of `config.json`, shown verbatim — not an editor. Edits
 | Area | Content |
 | --- | --- |
 | Runtime status | A read-only line with a small dot. It mirrors the [menu status](#status-item-and-menu): paused, the copy of any fault or retry, `Scanning…` while a scan runs, or a countdown to the next scan. It is not a live region, so screen readers read it on focus instead of announcing every refresh. Motion respects the system reduced-motion setting. |
-| Account | One muted line: the Feishu identity verified at startup and how its binding stands — `connected`, `sign-in required` when the identity fault shows, or `not verified` on an unconfigured startup. Hidden when no identity was verified. |
+| Account | One muted line: the Feishu identity verified at startup and how its binding stands — `connected`, or `unavailable` while intake is blocked. Hidden when no identity was verified. |
 | Configuration | The raw `config.json`, verbatim, in a selectable monospace block under a small `config.json` label. |
 | Footer | `Edit Config` and `Open Log` on the left, and one sentence on the right: an agent can manage this configuration too, pointed at the slashie CLI. Disable `Open Log` when the log is unavailable. |
 
@@ -64,9 +64,9 @@ The window is a mirror of `config.json`, shown verbatim — not an editor. Edits
 
 - From Finder, check the native menu in light and dark appearances. Verify keyboard navigation, Escape dismissal, and VoiceOver reading `Polling` and its checked state.
 - Launch both a bundled and an unbundled dev build and verify that neither shows a Dock icon or a Cmd+Tab entry while the tray item stays available.
-- Verify the dimmed glyph completely still while polling is off, and the whole glyph breathing while it is on: a one-second cycle between scans, quicker during a scan, holding full brightness briefly after a scan completes (including an empty one). Verify the plain glyph during startup, scan failure, retry, and shutdown, and confirm the icon and neighboring items stay in place throughout. The motion must match the switch: nothing animates while polling is off.
+- Verify the dimmed glyph completely still while polling is off, and the whole glyph breathing while it is on: a one-second cycle between scans, a smooth half-second triangle during a scan, full brightness held briefly after a scan completes (including an empty one). Verify the plain glyph during scan failure, retry, and shutdown, and confirm the icon and neighboring items stay in place throughout. The motion must match the switch: nothing animates while polling is off.
 - Verify the frames read at a glance in light and dark appearances and that the dot is visible without relying on color alone.
 - Turn polling off during a command and verify the [pause behavior](product.md#pause-and-recovery). Exercise backoff, failed setting writes, and an uncertain reply. Confirm normal states use the checkmark alone.
-- Open Settings while polling and verify the runtime status line shows the interval and scan age, switches to the breathing dot while a scan runs, and shows the paused copy when polling is off. Verify it carries the status-line copy during a fault, and that the dot does not animate when reduced motion is set.
+- Open Settings while polling and verify the runtime status line counts down to the next scan, switches to `Scanning…` while a scan runs, and shows `Paused` when polling is off. Verify it carries the status-line copy during a fault, the account line names the verified identity and its binding status, and the dot does not animate when reduced motion is set.
 - Open Settings and verify the mirror shows `config.json` verbatim. Run `slashie route add` in a terminal and confirm the new route appears within a couple of seconds without reopening the window. Use `Edit Config`, change a value, save the file, and confirm the mirror and the next scan pick it up; introduce a syntax error and confirm the mirror still shows the file with the explanation, then repair it and confirm recovery. Confirm that the log opens from Settings.
 - Quit during a command and verify cleanup before another instance can start. Launch from Finder while headless holds the lock and verify the startup alert.

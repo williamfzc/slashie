@@ -501,13 +501,7 @@ impl SettingsPayload {
     fn load(home: &std::path::Path, identity: &str, blocked: bool) -> Self {
         let path = home.join("config.json");
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        let identity_status = if identity.is_empty() {
-            "not verified"
-        } else if blocked {
-            "unavailable"
-        } else {
-            "connected"
-        };
+        let identity_status = if blocked { "unavailable" } else { "connected" };
         Self {
             config_unparsable: Config::parse(&text).is_err(),
             config_text: text,
@@ -568,7 +562,6 @@ struct StatusPayload {
     scanning: bool,
     /// Whole seconds until the run loop's next scan, when scheduled.
     next_scan_in_secs: Option<u64>,
-    poll_interval_secs: u64,
 }
 
 #[tauri::command]
@@ -591,7 +584,6 @@ fn get_status(state: State<'_, AppState>) -> StatusPayload {
         status_text: status_line(&status),
         scanning: status.scanning,
         next_scan_in_secs,
-        poll_interval_secs: state.rt.config.lock().unwrap().poll_interval,
     }
 }
 
@@ -599,6 +591,30 @@ fn get_status(state: State<'_, AppState>) -> StatusPayload {
 mod tests {
     use super::*;
     use crate::status::{OperatorFault, Phase, RetryKind};
+
+    #[test]
+    fn settings_payload_reports_identity_binding() {
+        let home = std::env::temp_dir().join(format!("slashie-ident-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::to_string_pretty(&Config::default()).unwrap(),
+        )
+        .unwrap();
+
+        let payload = SettingsPayload::load(&home, "ou_self", false);
+        assert_eq!(payload.identity, "ou_self");
+        assert_eq!(payload.identity_status, "connected");
+
+        let payload = SettingsPayload::load(&home, "ou_self", true);
+        assert_eq!(payload.identity_status, "unavailable");
+
+        let payload = SettingsPayload::load(&home, "", false);
+        assert_eq!(payload.identity, "");
+        assert_eq!(payload.identity_status, "connected");
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     #[test]
     fn frames_distinguish_paused_fault_and_polling() {

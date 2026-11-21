@@ -163,7 +163,7 @@
       } else if (runtime.next_scan_in_secs != null) {
         runtimeDot.classList.add("on");
         runtimeDot.classList.remove("scanning");
-        runtimeText.textContent = `Next scan in ${runtime.next_scan_in_secs}s`;
+        runtimeText.textContent = `Next scan in ${Math.max(1, runtime.next_scan_in_secs)}s`;
       } else {
         runtimeDot.classList.add("on");
         runtimeDot.classList.remove("scanning");
