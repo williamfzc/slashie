@@ -77,8 +77,9 @@ impl LarkCliTransport {
         }
     }
 
-    /// Test constructor with a short call deadline.
-    #[cfg(test)]
+    /// Test constructor with a short call deadline. Unix-only: its callers
+    /// live in the Unix-gated boundary tests that exec the fake CLI.
+    #[cfg(all(test, unix))]
     fn with_timeout_ms(mut self, ms: u64) -> LarkCliTransport {
         self.timeout_ms = ms;
         self
