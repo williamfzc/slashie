@@ -79,9 +79,56 @@ jobs:
           name: linux
           path: staging/*
 
+  headless-macos:
+    name: Headless binary (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the headless binary
+        run: cargo build --release --locked --no-default-features
+      - name: Stage release artifacts
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p staging
+          tar -czf "staging/slashie_${VERSION}_aarch64_macos.tar.gz" \
+            -C target/release slashie
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-cli
+          path: staging/*
+
+  headless-windows:
+    name: Headless binary (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the headless binary
+        run: cargo build --release --locked --no-default-features
+      - name: Stage release artifacts
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          New-Item -ItemType Directory -Force -Path staging | Out-Null
+          Compress-Archive -Path target/release/slashie.exe `
+            -DestinationPath "staging/slashie_${version}_x86_64_windows.zip"
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: staging/*
+
   release:
     name: Publish the GitHub release
-    needs: [macos, headless-linux]
+    needs: [macos, headless-linux, headless-macos, headless-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

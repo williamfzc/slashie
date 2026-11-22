@@ -11,11 +11,10 @@ definition of the check matrix — formatting, strict clippy, locked tests,
 documentation structure, headless and tray release builds, and the GUI-free
 dependency guard — is
 [.github/workflows/ci.yml](../.github/workflows/ci.yml); reuse its commands
-rather than re-deriving flags. Both a Linux headless job and a macOS tray
-job must pass. A macOS packaging job runs on every push to `main`: it
-verifies the dependency lock, builds the
-[.app bundle](DESIGN.md#desktop-build) with the pinned Tauri CLI, and
-uploads `Slashie.app` as a workflow artifact.
+rather than re-deriving flags. A Linux headless job, a macOS tray job, and
+a Windows headless job must pass. The [test coverage](testing.md) document
+maps user stories to the tests that guard them; a behavior change updates
+its guarding test in the same commit.
 
 Commits follow Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`).
 Rust dependencies are locked through the committed `Cargo.lock`.
@@ -23,6 +22,7 @@ Rust dependencies are locked through the committed `Cargo.lock`.
 ## Releases
 
 A separate workflow (`.github/workflows/release.yml`) runs only when a `v*`
-tag is pushed: it builds the macOS `.app` and DMG plus the Linux headless
-binary, and publishes a GitHub Release with those artifacts. Release versions
-come from the tag; nothing installable is produced by ordinary pushes.
+tag is pushed. It publishes a GitHub Release with five artifacts: the macOS
+`.app` bundle and DMG, and headless CLI binaries for Linux (x86_64),
+macOS (aarch64), and Windows (x86_64). Release versions come from the tag;
+nothing installable is produced by ordinary pushes.
