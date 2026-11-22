@@ -1,9 +1,10 @@
-//! `slashie route` subcommands: list, add, and remove route entries in
-//! config.json (DESIGN.md, "Configuration and files"). This is the
-//! interface agents use to configure routes without hand-editing JSON.
-//! The subcommand parses before the instance lock, so it works while the
-//! app runs (the runtime hot-reloads the file at its next scan) and a
-//! second process never trips the second-instance alert.
+//! Offline subcommands that parse before the instance lock (DESIGN.md,
+//! "Configuration and files"). `slashie route` lists, adds, and removes
+//! route entries in config.json — the interface agents use to configure
+//! routes without hand-editing JSON. `slashie log` prints recent
+//! operational log lines so a target agent can diagnose its own handoff.
+//! Both work while the app runs: route edits hot-reload at the next scan,
+//! and the log read never touches runtime state.
 
 use crate::config::{atomic_write, route_prefix_problem, Config, Route};
 use std::path::Path;
@@ -12,6 +13,9 @@ const ROUTE_USAGE: &str = "usage:\n  \
      slashie route list\n  \
      slashie route add <PREFIX> --cmd <COMMAND> [--dir <PATH>] [--timeout <SECS>] [--session chat]\n  \
      slashie route remove <PREFIX>";
+
+const LOG_USAGE: &str = "usage:\n  \
+     slashie log [--last N] [--id MESSAGE_ID]";
 
 /// Run one route subcommand and return its success output or a
 /// user-facing error. Exits the process from `main` either way.
@@ -112,6 +116,56 @@ fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<Str
         .ok_or_else(|| format!("{} needs a value\n{}", flag, ROUTE_USAGE))
 }
 
+/// Recent operational log lines (DESIGN.md file table) for agent
+/// self-diagnosis: a target that received `$SLASHIE_ID` can look up what
+/// happened to its own handoff. Strictly read-only — the current and
+/// rotated log are the only files opened, so this cannot admit, claim, or
+/// re-run anything, and it generates no new log lines.
+pub fn log(home: &Path, args: impl Iterator<Item = String>) -> Result<String, String> {
+    let mut last: usize = 100;
+    let mut id: Option<String> = None;
+    let mut args = args;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--last" => {
+                let raw = next_value(&mut args, "--last")?;
+                last = raw
+                    .parse()
+                    .map_err(|_| format!("--last expects a positive number, got {:?}", raw))?;
+                if last == 0 {
+                    return Err(format!("--last expects a positive number, got {:?}", raw));
+                }
+            }
+            "--id" => id = Some(next_value(&mut args, "--id")?),
+            other => return Err(format!("unknown log flag {:?}\n{}", other, LOG_USAGE)),
+        }
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut present = false;
+    // Rotated first: slashie.log.1 holds the older half of the history.
+    for name in ["slashie.log.1", "slashie.log"] {
+        if let Ok(text) = std::fs::read_to_string(home.join(name)) {
+            present = true;
+            lines.extend(text.lines().map(str::to_string));
+        }
+    }
+    if !present {
+        return Ok("no log entries yet.".into());
+    }
+    if let Some(id) = &id {
+        lines.retain(|line| line.contains(id.as_str()));
+    }
+    let start = lines.len().saturating_sub(last);
+    let tail = &lines[start..];
+    if tail.is_empty() {
+        return Ok(format!(
+            "no log entries match {:?}.",
+            id.as_deref().unwrap_or("")
+        ));
+    }
+    Ok(tail.join("\n"))
+}
+
 fn load_or_default(home: &Path) -> Result<Config, String> {
     let (cfg, fault) =
         Config::load_or_create(home).map_err(|e| format!("cannot read config.json: {}", e))?;
@@ -157,13 +211,15 @@ pub fn skill(home: &Path) -> String {
          - `config.json` in it holds all settings: routes, the poll interval, and\n\
          the Lark CLI binding. `state.json` records the polling on/off setting,\n\
          durable per-message claims, and conversation session mappings.\n\
-         `slashie.log` is the operational log.\n\
+         `slashie.log` is the operational log; read it with `slashie log`.\n\
          \n\
          # Commands\n\
          \n\
          - `slashie route list` - print the route table as JSON.\n\
          - `slashie route add <PREFIX> --cmd <COMMAND> [--dir <PATH>] [--timeout <SECS>] [--session chat]`\n\
          - `slashie route remove <PREFIX>`\n\
+         - `slashie log [--last N] [--id MESSAGE_ID]` - print recent operational log\n\
+         entries (timestamps, IDs, outcomes); works while Slashie is running.\n\
          \n\
          # Rules\n\
          \n\
@@ -186,6 +242,8 @@ pub fn skill(home: &Path) -> String {
          shared validation runs; an unparsable config blocks intake until repaired.\n\
          - Ask the user what they want to automate before changing routes, and show\n\
          the final `slashie route list` afterwards.\n\
+         - Log entries describe past work; never re-run work because of one. A\n\
+         request repeats only when the user sends a fresh Feishu message.\n\
          - Polling starts paused on a fresh install; route edits do nothing for\n\
          intake until the operator enables `Polling` from the menu-bar icon's\n\
          menu. `slashie --poll on|off` edits the same saved setting but only\n\
@@ -338,6 +396,56 @@ mod tests {
     }
 
     #[test]
+    fn log_prints_tail_filters_by_id_and_spans_rotation() {
+        let home = temp_home("logtail");
+        assert!(log(&home, std::iter::empty())
+            .unwrap()
+            .contains("no log entries yet."));
+        std::fs::write(
+            home.join("slashie.log.1"),
+            "older om_x line\nolder plain line\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join("slashie.log"),
+            "newer om_y line\nnewer plain line\n",
+        )
+        .unwrap();
+        let out = log(&home, std::iter::empty()).unwrap();
+        assert_eq!(
+            out.lines().collect::<Vec<_>>(),
+            [
+                "older om_x line",
+                "older plain line",
+                "newer om_y line",
+                "newer plain line"
+            ]
+        );
+        let args = ["--id", "om_x"].iter().map(|s| s.to_string());
+        assert_eq!(
+            log(&home, args).unwrap().lines().collect::<Vec<_>>(),
+            ["older om_x line"]
+        );
+        let args = ["--last", "2"].iter().map(|s| s.to_string());
+        assert_eq!(
+            log(&home, args).unwrap().lines().collect::<Vec<_>>(),
+            ["newer om_y line", "newer plain line"]
+        );
+        let args = ["--id", "om_missing"].iter().map(|s| s.to_string());
+        assert!(log(&home, args).unwrap().contains("no log entries match"));
+        // Usage errors.
+        let args = ["--last", "0"].iter().map(|s| s.to_string());
+        assert!(log(&home, args).is_err());
+        let args = ["--last", "soon"].iter().map(|s| s.to_string());
+        assert!(log(&home, args).is_err());
+        let args = ["--wat"].iter().map(|s| s.to_string());
+        assert!(log(&home, args).is_err());
+        let args = ["--id"].iter().map(|s| s.to_string());
+        assert!(log(&home, args).is_err());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn skill_document_names_the_runtime_and_contract() {
         let home = temp_home("skill");
         let doc = skill(&home);
@@ -347,10 +455,12 @@ mod tests {
             "route list",
             "route add <PREFIX> --cmd <COMMAND>",
             "route remove <PREFIX>",
+            "slashie log",
             "SLASHIE_ARGS",
             "SLASHIE_PROMPT",
             "--session chat",
             "next scan",
+            "fresh Feishu message",
         ] {
             assert!(doc.contains(needle), "missing {needle} in skill doc");
         }

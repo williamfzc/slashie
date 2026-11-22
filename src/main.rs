@@ -63,7 +63,12 @@ fn print_help() {
                                [--timeout <SECS>] [--session chat]\n\
                                Add a route.\n\
              route remove <PREFIX>\n\
-                               Remove a route.",
+                               Remove a route.\n\
+         \n\
+         LOG SUBCOMMAND:\n\
+             log [--last N] [--id MESSAGE_ID]\n\
+                               Print recent operational log lines\n\
+                               (read-only, safe while Slashie is running).",
         VERSION
     );
 }
@@ -141,6 +146,15 @@ fn main() {
             // alert (src/cli.rs, DESIGN.md "Configuration and files").
             "route" => {
                 match crate::cli::route(&runtime_home(), args) {
+                    Ok(text) => println!("{}", text),
+                    Err(msg) => fail(&msg),
+                }
+                return;
+            }
+            // The log read is offline and read-only in the same way: it
+            // opens only the operational log files and never runtime state.
+            "log" => {
+                match crate::cli::log(&runtime_home(), args) {
                     Ok(text) => println!("{}", text),
                     Err(msg) => fail(&msg),
                 }

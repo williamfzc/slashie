@@ -636,12 +636,16 @@ impl Runtime {
         }
 
         // Complete scan: record its end and prune settled claims that have
-        // left the scan horizon.
-        self.logger.log(&format!(
-            "scan ok: {} eligible, {} admitted",
-            eligible_count,
-            jobs.len()
-        ));
+        // left the scan horizon. Empty scans stay out of the log: polling
+        // runs continuously and nothing found is the common case, so one
+        // line per scan would dominate the file (log restraint).
+        if eligible_count > 0 {
+            self.logger.log(&format!(
+                "scan ok: {} eligible, {} admitted",
+                eligible_count,
+                jobs.len()
+            ));
+        }
         {
             let mut status = self.status.lock().unwrap();
             let mut st = self.state.lock().unwrap();
@@ -1131,6 +1135,31 @@ mod tests {
             _ => panic!(),
         };
         assert_eq!(st.claims.len(), 1);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn quiet_scans_stay_out_of_the_log() {
+        let boundary = now_ms() - 60_000;
+        // An empty scan logs nothing: polling runs continuously and an
+        // empty result is the common case.
+        let (mut rt, _, home) = init_rt("quiet_empty", fixture_with(vec![]), boundary);
+        assert_eq!(rt.scan_once().unwrap().len(), 0);
+        let text = std::fs::read_to_string(home.join("slashie.log")).unwrap();
+        assert!(!text.contains("scan ok"), "empty scan logged: {}", text);
+        // A scan that finds an eligible message still reports itself.
+        let message = mkmsg(
+            "om_quiet",
+            boundary + 1_000,
+            "ou_self",
+            Some("/ping"),
+            true,
+            false,
+        );
+        rt.transport = Arc::new(MockTransport::new(fixture_with(vec![message])));
+        assert_eq!(rt.scan_once().unwrap().len(), 1);
+        let text = std::fs::read_to_string(home.join("slashie.log")).unwrap();
+        assert!(text.contains("scan ok: 1 eligible"), "{}", text);
         let _ = std::fs::remove_dir_all(&home);
     }
 
