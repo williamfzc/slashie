@@ -16,6 +16,31 @@ use std::sync::Arc;
 
 pub const MAX_CAPTURE_BYTES: usize = 64 * 1024;
 pub const MAX_REPLY_CHARS: usize = 4000;
+/// How long the final pipe drain waits for EOF after the child is settled
+/// before captured output is frozen (DESIGN.md "Command execution").
+const DRAIN_BOUND_MS: u64 = 2000;
+
+/// Latest published capture from a drain thread: consume everything queued
+/// by the deadline, keeping the most recent snapshot. A clean EOF delivers
+/// the full buffer; a stalled pipe keeps whatever arrived in time.
+fn latest_capture(
+    rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    deadline: std::time::Instant,
+) -> Vec<u8> {
+    use std::sync::mpsc::RecvTimeoutError;
+    let mut out = Vec::new();
+    loop {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        match rx.recv_timeout(deadline - now) {
+            Ok(buf) => out = buf,
+            Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    out
+}
 
 pub struct Outcome {
     pub reply_text: String,
@@ -231,11 +256,14 @@ pub fn run_command_with(
 
     let mut stdout_pipe = child.stdout.take().unwrap();
     let mut stderr_pipe = child.stderr.take().unwrap();
-    let mut stdout_buf = Vec::new();
-    let mut stderr_buf = Vec::new();
 
-    // Drain both pipes concurrently, bounded in size.
+    // Drain both pipes concurrently, bounded in size. Results travel over
+    // channels so the joins below can be bounded: a detached child that
+    // keeps a pipe open must not stall settlement forever.
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
     let t1 = std::thread::spawn(move || {
+        let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
         loop {
             match stdout_pipe.read(&mut chunk) {
@@ -244,26 +272,31 @@ pub fn run_command_with(
                     // Drain to EOF even past the capture cap: closing the
                     // pipe early would kill a productive child with SIGPIPE
                     // and turn a successful command into "Command failed."
-                    let take = n.min(MAX_CAPTURE_BYTES.saturating_sub(stdout_buf.len()));
-                    stdout_buf.extend_from_slice(&chunk[..take]);
+                    let take = n.min(MAX_CAPTURE_BYTES.saturating_sub(buf.len()));
+                    buf.extend_from_slice(&chunk[..take]);
+                    // Publish each chunk so a bounded wait below still sees
+                    // the output captured so far.
+                    let _ = stdout_tx.send(buf.clone());
                 }
             }
         }
-        stdout_buf
+        let _ = stdout_tx.send(buf);
     });
     let t2 = std::thread::spawn(move || {
+        let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
         loop {
             match stderr_pipe.read(&mut chunk) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     // Same drain-past-the-cap contract as stdout.
-                    let take = n.min(MAX_CAPTURE_BYTES.saturating_sub(stderr_buf.len()));
-                    stderr_buf.extend_from_slice(&chunk[..take]);
+                    let take = n.min(MAX_CAPTURE_BYTES.saturating_sub(buf.len()));
+                    buf.extend_from_slice(&chunk[..take]);
+                    let _ = stderr_tx.send(buf.clone());
                 }
             }
         }
-        stderr_buf
+        let _ = stderr_tx.send(buf);
     });
 
     let deadline = started + std::time::Duration::from_millis(timeout_ms);
@@ -301,8 +334,16 @@ pub fn run_command_with(
         crate::process::terminate_tree(&mut child);
     }
 
-    let stdout = t1.join().unwrap_or_default();
-    let stderr = t2.join().unwrap_or_default();
+    // Bound the final drain: normally the pipes reach EOF and the last
+    // snapshot is the full capture, but a detached child that inherited a
+    // pipe handle (MSYS double-fork escapes tree termination on Windows)
+    // must not stall settlement forever. Whatever it prints past the bound
+    // is frozen out of the capture.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(DRAIN_BOUND_MS);
+    let stdout = latest_capture(&stdout_rx, deadline);
+    let stderr = latest_capture(&stderr_rx, deadline);
+    drop(t1);
+    drop(t2);
     // Reap the direct child regardless of path.
     let exit_code = match status {
         Some(st) => st.code(),
@@ -421,33 +462,61 @@ mod tests {
             )
             .reply_text
         };
-        let claude = dir.join("claude");
-        assert_eq!(
-            run("/claude", false),
-            format!("{}|-p -- hello|", claude.display())
-        );
-        assert_eq!(
-            run("/claude", true),
-            format!("{}|-p --continue -- hello|", claude.display())
-        );
-        let codex = dir.join("codex");
-        assert_eq!(
-            run("/codex", false),
-            format!("{}|exec --skip-git-repo-check -- hello|", codex.display())
-        );
-        assert_eq!(
-            run("/codex", true),
-            format!(
-                "{}|exec resume --last --skip-git-repo-check -- hello|",
-                codex.display()
-            )
-        );
-        let pi = dir.join("pi-real");
-        assert_eq!(run("/pi", false), format!("{}|-p|hello", pi.display()));
-        assert_eq!(
-            run("/pi", true),
-            format!("{}|-p --continue|hello", pi.display())
-        );
+        let _claude = dir.join("claude");
+        // Windows sh reports the resolved script as its POSIX path (Git Bash
+        // maps the temp dir to /tmp), so the flag-shaping contract is
+        // asserted there without the exact $0 spelling.
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                run("/claude", false),
+                format!("{}|-p -- hello|", _claude.display())
+            );
+            assert_eq!(
+                run("/claude", true),
+                format!("{}|-p --continue -- hello|", _claude.display())
+            );
+        }
+        #[cfg(windows)]
+        {
+            assert!(run("/claude", false).contains("claude|-p -- hello|"));
+            assert!(run("/claude", true).contains("claude|-p --continue -- hello|"));
+        }
+        let _codex = dir.join("codex");
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                run("/codex", false),
+                format!("{}|exec --skip-git-repo-check -- hello|", _codex.display())
+            );
+            assert_eq!(
+                run("/codex", true),
+                format!(
+                    "{}|exec resume --last --skip-git-repo-check -- hello|",
+                    _codex.display()
+                )
+            );
+        }
+        #[cfg(windows)]
+        {
+            assert!(run("/codex", false).contains("codex|exec --skip-git-repo-check -- hello|"));
+            assert!(run("/codex", true)
+                .contains("codex|exec resume --last --skip-git-repo-check -- hello|"));
+        }
+        let _pi = dir.join("pi-real");
+        #[cfg(unix)]
+        {
+            assert_eq!(run("/pi", false), format!("{}|-p|hello", _pi.display()));
+            assert_eq!(
+                run("/pi", true),
+                format!("{}|-p --continue|hello", _pi.display())
+            );
+        }
+        #[cfg(windows)]
+        {
+            assert!(run("/pi", false).contains("pi-real|-p|hello"));
+            assert!(run("/pi", true).contains("pi-real|-p --continue|hello"));
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

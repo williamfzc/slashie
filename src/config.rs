@@ -426,9 +426,14 @@ mod tests {
 
     #[test]
     fn empty_lark_profile_means_cli_default() {
+        // Each platform's own notion of an absolute path.
+        #[cfg(unix)]
+        let cli_path = "/usr/local/bin/lark-cli";
+        #[cfg(windows)]
+        let cli_path = "C:\\Program Files\\lark-cli\\lark-cli.cmd";
         let mut cfg = Config {
             lark_cli: Some(LarkCli {
-                path: "/usr/local/bin/lark-cli".into(),
+                path: cli_path.into(),
                 profile: "".into(),
             }),
             ..Config::default()
