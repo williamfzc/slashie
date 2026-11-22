@@ -1,7 +1,7 @@
-//! `slashie` entry point. The macOS bundle starts in menu-bar mode (tray
-//! feature); `--headless` selects foreground mode, and a headless build
-//! (no default features) is foreground-only (DESIGN.md "Launch and
-//! shutdown", "Desktop build").
+//! `slashie` entry point. Host selection is a build-time property (DESIGN.md
+//! "Launch and shutdown", "Desktop build"): the macOS bundle (tray feature)
+//! runs as a menu-bar app, and a headless build (no default features) runs
+//! the same runtime in the foreground. There is no runtime override.
 
 mod cli;
 mod config;
@@ -46,8 +46,6 @@ fn print_help() {
              slashie route <SUBCOMMAND>\n\
          \n\
          OPTIONS:\n\
-             --headless        Run the shared runtime in the foreground even in\n\
-                               the macOS bundle (default for headless builds).\n\
              --poll <on|off>   Update the persisted polling setting under the\n\
                                lock, then exit.\n\
              --mock <FILE>     Use the mock Feishu transport backed by a JSON\n\
@@ -101,7 +99,6 @@ fn runtime_home() -> PathBuf {
 }
 
 fn main() {
-    let mut headless = false;
     let mut poll: Option<bool> = None;
     let mut mock_path: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
@@ -122,7 +119,6 @@ fn main() {
                 println!("slashie {}", VERSION);
                 return;
             }
-            "--headless" => headless = true,
             "--poll" => {
                 let v = args
                     .next()
@@ -153,15 +149,11 @@ fn main() {
             other => fail(&format!("unknown argument {:?}; try --help", other)),
         }
     }
-    // The macOS bundle starts in menu-bar mode; --headless forces foreground.
-    // A headless build is foreground-only.
-    #[cfg(not(feature = "tray"))]
-    let menu_bar_mode = {
-        let _ = headless;
-        false
-    };
-    #[cfg(feature = "tray")]
-    let menu_bar_mode = !headless && std::env::var("SLASHIE_HEADLESS").is_err();
+    // Host selection is build-time: the tray build is the menu-bar app, and
+    // the headless build runs the runtime in the foreground. The compiler
+    // folds this constant, so each artifact contains exactly one host
+    // (DESIGN.md "Launch and shutdown").
+    let menu_bar_mode = cfg!(feature = "tray");
 
     let home = runtime_home();
     std::fs::create_dir_all(&home)

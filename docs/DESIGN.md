@@ -10,7 +10,7 @@ The [product specification](product.md) owns user-visible behavior. The [menu ba
 
 ## Runtime
 
-Use one Rust package and one in-process runtime. Both launch modes share configuration, the real user's `~/.slashie/` directory, and an exclusive OS lock on a stable `app.lock`. Hold the lock until shutdown and close its descriptor on subprocess exec. `slashie` launches the runtime. `lark-cli` provides external Feishu access.
+Use one Rust package and one in-process runtime. Both artifacts (the macOS bundle and the headless binary) share configuration, the real user's `~/.slashie/` directory, and an exclusive OS lock on a stable `app.lock`. Hold the lock until shutdown and close its descriptor on subprocess exec. `slashie` launches the runtime. `lark-cli` provides external Feishu access.
 
 | Owner | Responsibility |
 | --- | --- |
@@ -24,7 +24,7 @@ Give each host a control handle for status, polling changes, and shutdown. A coo
 
 ### Launch and shutdown
 
-The macOS bundle starts in menu-bar mode. `--headless` selects foreground mode before Tauri initializes. A headless build uses foreground mode by default. `--help`, `--version`, and the offline `route` subcommands exit before opening runtime files. The headless control command `--poll on|off` updates the same persisted polling setting as the menu under the lock, then exits. A headless lock conflict reports an error and exits.
+The macOS bundle starts in menu-bar mode and contains no foreground host; a headless build is foreground-only. Host selection is a build-time property of each artifact, with no runtime override. `--help`, `--version`, and the offline `route` subcommands exit before opening runtime files. The headless control command `--poll on|off` updates the same persisted polling setting as the menu under the lock, then exits. A headless lock conflict reports an error and exits.
 
 Menu Quit, Cmd+Q, and SIGINT/SIGTERM request shared shutdown. The menu-bar host exits after the runtime drains. Closing Settings only hides its window and leaves the runtime running. The host holds a user-initiated activity token so App Nap cannot suspend polling while no window is visible; idle system sleep is still allowed. Shutdown stops intake, cancels active Feishu calls, terminates and reaps the active command group, and releases the lock after cleanup. Abandoned claims remain consumed. Canceling a request after Feishu may have accepted it leaves delivery uncertain.
 
@@ -36,7 +36,7 @@ Use Tauri 2 for the macOS shell. Enable `tray` only in native macOS builds. Gate
 | --- | --- |
 | macOS bundle | `cargo tauri build --features tray --bundles app,dmg`. Pushing a `v*` tag builds the bundle through the release workflow and publishes it on a GitHub Release. Run the [menu acceptance checks](menu-bar.md#acceptance) on the installed bundle. |
 | Headless binary | `cargo build --release --no-default-features`. Inspect `cargo tree --no-default-features --edges normal,build` for GUI dependencies. Build and run on Linux without a display session. |
-| Shared runtime | Run the same controlled search and `/ping` cases through both macOS launch modes. Check lock contention and verify that switching modes preserves the polling setting and durable claims. |
+| Shared runtime | Run the same controlled search and `/ping` cases through both artifacts (bundle and headless binary). Check lock contention and verify that switching artifacts preserves the polling setting and durable claims. |
 
 For v1.2, use a systemd user service under the authorized account. Invoke the foreground binary with the saved polling setting. Use `KillMode=mixed` and allow shared shutdown to finish within the stop timeout. Restart on unexpected failures. A lock conflict or unrecoverable startup fault requires operator action. Validate service credential access separately before promising operation outside a login session. [systemd service lifecycle](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html) · [systemd kill modes](https://www.freedesktop.org/software/systemd/man/latest/systemd.kill.html)
 

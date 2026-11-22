@@ -62,7 +62,7 @@ def main():
         log_path = output / f'{name}-process.log'
         expected = {case['id'] for case in cases if not case.get('ignore')}
         with log_path.open('w') as log:
-            process = subprocess.Popen([str(binary), '--headless', '--mock', str(fixture)], env=env,
+            process = subprocess.Popen([str(binary), '--mock', str(fixture)], env=env,
                                        stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             limit = time.monotonic() + 240
             settled = set()

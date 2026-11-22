@@ -64,7 +64,7 @@ Feishu chat ──poll──▶ slashie (menu bar) ──▶ /bin/sh -c "<route 
                         per-chat agent sessions   local tools
 ```
 
-A shared Rust runtime drives everything: durable per-message claims in `state.json`, a FIFO mailbox per conversation (serial within a chat, parallel across chats), a channel boundary that keeps Feishu wire handling behind the `Channel` trait, and configuration that hot-reloads from disk at every scan. The macOS shell is a Tauri 2 tray app whose icon is a live state indicator; the same binary runs headless for servers. See the [technical design](docs/DESIGN.md).
+A shared Rust runtime drives everything: durable per-message claims in `state.json`, a FIFO mailbox per conversation (serial within a chat, parallel across chats), a channel boundary that keeps Feishu wire handling behind the `Channel` trait, and configuration that hot-reloads from disk at every scan. The macOS shell is a Tauri 2 tray app whose icon is a live state indicator; servers run the same runtime as a headless binary. See the [technical design](docs/DESIGN.md).
 
 | Docs | |
 | --- | --- |
@@ -75,7 +75,7 @@ A shared Rust runtime drives everything: durable per-message claims in `state.js
 
 ## Status
 
-macOS menu-bar app and headless mode are working today; the live chat-session flow is verified with Pi and Claude Code. Linux headless (systemd) is planned next — see [delivery status](docs/product.md#delivery-and-evidence).
+macOS menu-bar app and headless binary are working today; the live chat-session flow is verified with Pi and Claude Code. Linux headless (systemd) is planned next — see [delivery status](docs/product.md#delivery-and-evidence).
 
 Start with the [documentation index](docs/index.md).
 

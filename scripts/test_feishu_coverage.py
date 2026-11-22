@@ -121,7 +121,7 @@ def main():
         nonlocal process,log
         subprocess.run([str(binary),'--poll','on' if on else 'off'],env=env,capture_output=True,check=True)
         n=len(list(out.glob('process-*.log')));lp=out/('process-'+str(n)+'.log');log=lp.open('w')
-        process=subprocess.Popen([str(binary),'--headless'],env=env,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+        process=subprocess.Popen([str(binary)],env=env,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
         end=time.monotonic()+45
         while time.monotonic()<end:
             if ('scan ok:' if on else 'slashie starting') in lp.read_text():return
