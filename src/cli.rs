@@ -97,7 +97,6 @@ fn remove(home: &Path, args: &mut impl Iterator<Item = String>) -> Result<String
     let mut cfg = load_or_default(home)?;
     let before = cfg.routes.len();
     cfg.routes.retain(|r| r.prefix != prefix);
-    cfg.default_prompts.remove(&prefix);
     if cfg.routes.len() == before {
         return Err(format!("no route {:?} to remove", prefix));
     }

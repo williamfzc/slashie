@@ -65,9 +65,6 @@ pub struct Config {
     pub poll_interval: u64,
     #[serde(default)]
     pub routes: Vec<Route>,
-    /// Per-route defaults passed as data, never interpolated into shell code.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub default_prompts: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub reply_mode: ReplyMode,
 }
@@ -78,7 +75,6 @@ impl Default for Config {
             lark_cli: None,
             process_path: DEFAULT_PROCESS_PATH.iter().map(|s| s.to_string()).collect(),
             poll_interval: DEFAULT_POLL_INTERVAL,
-            default_prompts: Default::default(),
             reply_mode: ReplyMode::Agent,
             routes: [
                 ("/ping", "echo pong", None, None),
@@ -194,17 +190,6 @@ pub fn validate(cfg: &Config) -> Result<(), ConfigError> {
             }
         }
     }
-    for (prefix, prompt) in &cfg.default_prompts {
-        if !cfg.routes.iter().any(|r| &r.prefix == prefix) {
-            return err(format!("default prompt has no route {:?}", prefix));
-        }
-        if prompt.chars().count() > 32_768 {
-            return err(format!(
-                "default prompt for {:?} exceeds 32768 characters",
-                prefix
-            ));
-        }
-    }
     for dir in &cfg.process_path {
         if !Path::new(dir).is_absolute() {
             return err(format!("process_path entries must be absolute: {:?}", dir));
@@ -285,15 +270,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_prompts_require_a_route_and_roundtrip() {
-        let mut cfg = Config::default();
-        cfg.default_prompts
-            .insert("/ping".into(), "Keep it concise".into());
+    fn config_without_default_prompts_still_parses_and_ignores_legacy_key() {
+        let cfg = Config::default();
         let text = serde_json::to_string(&cfg).unwrap();
         assert_eq!(Config::parse(&text).unwrap(), cfg);
-        cfg.default_prompts
-            .insert("/missing".into(), "hello".into());
-        assert!(validate(&cfg).is_err());
+        // A configuration saved by an older build may still carry the key;
+        // it is an unknown property now and must not block intake.
+        let legacy = text.replace(
+            "}]",
+            "}], \"default_prompts\": {\"/ping\": \"Keep it concise\"}",
+        );
+        assert_eq!(Config::parse(&legacy).unwrap(), cfg);
     }
 
     #[test]

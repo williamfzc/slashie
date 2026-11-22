@@ -84,7 +84,7 @@ Run the trusted route program with `/bin/sh -c`. Pass message data through the e
 | Variable | Value |
 | --- | --- |
 | `SLASHIE_ARGS` | Argument text after the prefix, with internal line breaks preserved. |
-| `SLASHIE_PROMPT` | Optional route default prompt, arguments, a blank line, and the source description including the exact message link. |
+| `SLASHIE_PROMPT` | Arguments, a blank line, and the source description including the exact message link. |
 | `SLASHIE_ID` | Source message ID. |
 | `SLASHIE_LINK` | Exact source message navigation URL. Feishu refuses to launch a handoff when resolution fails. |
 | `SLASHIE_CONTEXT` | Source description: message ID, channel, chat ID and type, topic ID, link, and sender. |
@@ -144,7 +144,7 @@ On initial setup, the stock configuration includes `/ping` (runs `echo pong`; fo
 | `app.lock` | Instance ownership via a held descriptor. |
 | `slashie.log` | Timestamps, IDs, durations, and outcomes. Rotate at 2 MiB and keep one previous log. |
 
-Settings controls listening and polling frequency. Missing reply permission is not an availability fault in default agent mode. Settings also edits each route's program and optional default prompt. It preserves unknown JSON properties, compares the editor's starting file with the latest contents to reject stale writes, validates the whole configuration and saves atomically. The raw configuration remains under Advanced; external file and CLI edits are supported. All paths share this schema and validator. Route programs, defaults and interval apply without restart; changed `lark_cli` requires restart. `default_prompts` maps existing prefixes to text, defaults to empty and is limited to 32,768 characters per entry. Removing a route also removes its default. A read-only connection check is limited to once per minute per app instance; it does not send a message or prove a target program is working.
+Settings controls listening and polling frequency. Missing reply permission is not an availability fault in default agent mode. Settings also edits each route's program. It preserves unknown JSON properties, compares the editor's starting file with the latest contents to reject stale writes, validates the whole configuration and saves atomically. The raw configuration remains under Advanced; external file and CLI edits are supported. All paths share this schema and validator. Route programs and interval apply without restart; changed `lark_cli` requires restart. A read-only connection check is limited to once per minute per app instance; it does not send a message or prove a target program is working.
 
 Manage routes offline through the CLI: `slashie route list` prints the route table as JSON, `slashie route add <PREFIX> --cmd <COMMAND> [--dir <PATH>] [--timeout <SECS>] [--session chat]` adds one route, and `slashie route remove <PREFIX>` removes it. `slashie --skill` prints this operating contract as a SKILL.md-style document, so any local agent that discovers the binary can teach itself how to operate Slashie. These subcommands run before the instance lock, so they work while the app is running and never trigger the second-instance alert. They reuse the schema and validator, validate the whole file before writing atomically, and refuse to edit an unparsable configuration. This is the interface agents use to configure routes on the user's behalf; the runtime applies the saved file at its next scan.
 

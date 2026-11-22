@@ -709,17 +709,7 @@ impl Runtime {
         if let Ok(link) = &link_result {
             message.link = link.clone();
         }
-        let mut inputs = build_inputs(&job.route.prefix, &message, &key);
-        if let Some(default_prompt) = self
-            .config
-            .lock()
-            .unwrap()
-            .default_prompts
-            .get(&job.route.prefix)
-            .filter(|p| !p.trim().is_empty())
-        {
-            inputs.prompt = format!("{}\n\n{}", default_prompt, inputs.prompt);
-        }
+        let inputs = build_inputs(&job.route.prefix, &message, &key);
         let timeout_secs = job.route.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS);
         // Commands started after a config swap use the new subprocess path.
         let process_path = self.config.lock().unwrap().process_path.clone();
@@ -1875,7 +1865,7 @@ mod tests {
     }
 
     #[test]
-    fn handoff_forwards_default_prompt_and_exact_source_link() {
+    fn handoff_forwards_exact_source_link() {
         let now = now_ms();
         let mut msg = mkmsg(
             "om_handoff",
@@ -1890,11 +1880,6 @@ mod tests {
         );
         let (rt, mock, home) =
             init_rt("handoff-input", fixture_with(vec![msg.clone()]), now - 1000);
-        rt.config
-            .lock()
-            .unwrap()
-            .default_prompts
-            .insert("/ping".into(), "Read the linked conversation first.".into());
         let mut route = rt.config.lock().unwrap().routes[0].clone();
         route.cmd = "printf '%s\\n%s' \"$SLASHIE_PROMPT\" \"$SLASHIE_LINK\"".into();
         rt.process_job(Job {
@@ -1903,9 +1888,6 @@ mod tests {
             route,
         });
         let replies = mock.reply_records();
-        assert!(replies[0]
-            .text
-            .starts_with("Read the linked conversation first."));
         assert!(replies[0].text.contains("continue work"));
         assert!(replies[0].text.contains(
             "link: https://applink.feishu.cn/client/chat/open?openChatId=oc_test&position=28"
