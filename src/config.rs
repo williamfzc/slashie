@@ -12,7 +12,8 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// System dirs plus the common Homebrew prefixes, so the stock agent
 /// routes (`claude`, `codex`, `pi`) resolve on a normal machine without
 /// hand-editing config.json (DESIGN.md "Configuration and files").
-pub const DEFAULT_PROCESS_PATH: [&str; 6] = [
+#[cfg(unix)]
+pub const DEFAULT_PROCESS_PATH: &[&str] = &[
     "/usr/bin",
     "/bin",
     "/usr/sbin",
@@ -20,6 +21,11 @@ pub const DEFAULT_PROCESS_PATH: [&str; 6] = [
     "/usr/local/bin",
     "/opt/homebrew/bin",
 ];
+/// Windows has no canonical tool directories: an empty default leaves the
+/// route command inheriting the ambient PATH. Route resolution itself
+/// still needs `sh` (Git for Windows) on the binary's own PATH (DESIGN.md).
+#[cfg(windows)]
+pub const DEFAULT_PROCESS_PATH: &[&str] = &[];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LarkCli {

@@ -1,10 +1,11 @@
 //! Instance ownership via an exclusive OS lock on `app.lock` (DESIGN.md).
 //!
-//! The descriptor is held for the process lifetime; the kernel releases it on
-//! exit, including crashes. Lock conflicts report an error and exit.
+//! The descriptor is held for the process lifetime; the kernel releases it
+//! on exit, including crashes. Lock conflicts report an error and exit.
+//! `File::try_lock` maps to `flock(LOCK_EX | LOCK_NB)` on Unix and
+//! `LockFileEx` on Windows, so one implementation serves both.
 
 use std::fs::OpenOptions;
-use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 #[derive(Debug)]
@@ -32,13 +33,10 @@ pub fn acquire(home: &Path) -> LockResult {
         Ok(f) => f,
         Err(e) => return LockResult::Failed(format!("cannot open {}: {}", path.display(), e)),
     };
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc == 0 {
-        LockResult::Acquired(AppLock { _file: file })
-    } else if std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK) {
-        LockResult::Conflict
-    } else {
-        LockResult::Failed(format!("flock failed: {}", std::io::Error::last_os_error()))
+    match file.try_lock() {
+        Ok(()) => LockResult::Acquired(AppLock { _file: file }),
+        Err(std::fs::TryLockError::WouldBlock) => LockResult::Conflict,
+        Err(e) => LockResult::Failed(format!("app.lock lock failed: {}", e)),
     }
 }
 

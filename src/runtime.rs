@@ -901,8 +901,17 @@ fn ensure_chat_workspace(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Default working directory for route commands: HOME on Unix, USERPROFILE
+/// on Windows, and the system temp directory as a last resort.
 fn home_dir() -> String {
-    std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+    for var in ["HOME", "USERPROFILE"] {
+        if let Ok(home) = std::env::var(var) {
+            if !home.is_empty() {
+                return home;
+            }
+        }
+    }
+    std::env::temp_dir().to_string_lossy().to_string()
 }
 
 #[cfg(test)]

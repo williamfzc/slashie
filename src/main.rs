@@ -9,6 +9,7 @@ mod lark;
 mod lock;
 mod logging;
 mod mailbox;
+mod process;
 mod runtime;
 mod state;
 // The status copy table is consumed by the menu bar (tray build); the
@@ -22,13 +23,17 @@ mod worker;
 mod app;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(unix)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 static SHUTDOWN_PTR: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(unix)]
 extern "C" fn on_signal(_sig: libc::c_int) {
     let p = SHUTDOWN_PTR.load(Ordering::SeqCst) as *const AtomicBool;
     if !p.is_null() {
@@ -99,8 +104,15 @@ fn runtime_home() -> PathBuf {
     if let Ok(dir) = std::env::var("SLASHIE_HOME") {
         return PathBuf::from(dir);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| fail("HOME is not set"));
-    PathBuf::from(home).join(".slashie")
+    // HOME is the Unix convention; Windows sessions only set USERPROFILE.
+    for var in ["HOME", "USERPROFILE"] {
+        if let Ok(home) = std::env::var(var) {
+            if !home.is_empty() {
+                return PathBuf::from(home).join(".slashie");
+            }
+        }
+    }
+    fail("neither HOME nor USERPROFILE is set")
 }
 
 fn main() {
@@ -194,11 +206,23 @@ fn main() {
     std::mem::forget(guard);
 
     let shutdown = Arc::new(AtomicBool::new(false));
-    SHUTDOWN_PTR.store(Arc::as_ptr(&shutdown) as usize, Ordering::SeqCst);
-    unsafe {
-        let handler = on_signal as extern "C" fn(libc::c_int) as usize;
-        libc::signal(libc::SIGINT, handler);
-        libc::signal(libc::SIGTERM, handler);
+    #[cfg(unix)]
+    {
+        SHUTDOWN_PTR.store(Arc::as_ptr(&shutdown) as usize, Ordering::SeqCst);
+        unsafe {
+            let handler = on_signal as extern "C" fn(libc::c_int) as usize;
+            libc::signal(libc::SIGINT, handler);
+            libc::signal(libc::SIGTERM, handler);
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Console control (Ctrl+C, console close, logoff) sets the same
+        // flag so shutdown drains like the Unix signal path. Best effort:
+        // if installation fails, a hard kill recovers claims as interrupted
+        // on the next start.
+        let flag = Arc::clone(&shutdown);
+        let _ = ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst));
     }
 
     // Load (or create) configuration before choosing the transport so both

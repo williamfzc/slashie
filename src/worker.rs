@@ -1,9 +1,11 @@
 //! Command execution (DESIGN.md, "Command execution").
 //!
-//! Runs the trusted route program with /bin/sh -c, passing message data only
-//! through quoted SLASHIE_ARGS / SLASHIE_PROMPT environment values so message
-//! text can never change the shell program. Each subprocess gets its own Unix
-//! process group; timeouts and shutdown terminate then kill the group.
+//! Runs the trusted route program with `sh -c` (/bin/sh on Unix; sh from
+//! PATH on Windows, supplied by Git for Windows), passing message data only
+//! through quoted SLASHIE_ARGS / SLASHIE_PROMPT environment values so
+//! message text can never change the shell program. Each subprocess is
+//! isolated at spawn; timeouts and shutdown apply the graceful-then-force
+//! termination contract (src/process.rs).
 
 use crate::config::Route;
 use crate::transport::{ConversationKey, Message};
@@ -14,7 +16,6 @@ use std::sync::Arc;
 
 pub const MAX_CAPTURE_BYTES: usize = 64 * 1024;
 pub const MAX_REPLY_CHARS: usize = 4000;
-const GROUP_KILL_WAIT_MS: u64 = 2000;
 
 pub struct Outcome {
     pub reply_text: String,
@@ -114,12 +115,6 @@ pub fn compose_reply(outcome_success: bool, stdout: &[u8], stderr: &[u8], timeou
     text
 }
 
-fn kill_process_group(pgid: i32, sig: i32) {
-    unsafe {
-        libc::kill(-pgid, sig);
-    }
-}
-
 /// Compatibility wrapper used by command-level tests and callers without a
 /// chat session.
 #[cfg(test)]
@@ -161,6 +156,11 @@ pub fn run_command_with(
     let started = std::time::Instant::now();
     let timeout_ms = route.timeout.unwrap_or(crate::config::DEFAULT_TIMEOUT_SECS) * 1000;
 
+    // The route contract is a POSIX shell program. Unix keeps the absolute
+    // /bin/sh; Windows resolves `sh` from PATH (Git for Windows supplies it).
+    #[cfg(windows)]
+    let mut cmd = Command::new("sh");
+    #[cfg(not(windows))]
     let mut cmd = Command::new("/bin/sh");
     cmd.arg("-c").arg(&route.cmd);
     cmd.env("SLASHIE_ARGS", &inputs.args);
@@ -206,12 +206,9 @@ pub fn run_command_with(
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    // Own process group from spawn (std CommandExt; no setpgid race).
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    // Isolated at spawn: own process group on Unix, plain child on Windows
+    // (tree termination walks the tree instead).
+    crate::process::isolate(&mut cmd);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -229,8 +226,6 @@ pub fn run_command_with(
             };
         }
     };
-    let pgid = child.id() as i32;
-
     // Close stdin to signal EOF (no stdin input is provided).
     drop(child.stdin.take());
 
@@ -289,12 +284,10 @@ pub fn run_command_with(
             }
         }
         if shutdown.load(Ordering::SeqCst) {
-            kill_process_group(pgid, libc::SIGTERM);
             termination = "shutdown".into();
             break;
         }
         if std::time::Instant::now() >= deadline {
-            kill_process_group(pgid, libc::SIGTERM);
             termination = "timeout".into();
             timed_out = true;
             break;
@@ -303,21 +296,9 @@ pub fn run_command_with(
     }
 
     if timed_out || termination == "shutdown" {
-        // Wait up to 2s for the group to die, then SIGKILL survivors.
-        let wait_until =
-            std::time::Instant::now() + std::time::Duration::from_millis(GROUP_KILL_WAIT_MS);
-        while std::time::Instant::now() < wait_until {
-            // group_alive: kill(pgid, 0)
-            let alive = unsafe { libc::kill(-pgid, 0) } == 0;
-            if !alive {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        let still = unsafe { libc::kill(-pgid, 0) } == 0;
-        if still {
-            kill_process_group(pgid, libc::SIGKILL);
-        }
+        // SIGTERM the group, wait up to 2s, SIGKILL survivors (taskkill
+        // graceful-then-force on Windows).
+        crate::process::terminate_tree(&mut child);
     }
 
     let stdout = t1.join().unwrap_or_default();

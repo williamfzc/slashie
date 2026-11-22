@@ -7,11 +7,18 @@ description = "Send a slash command in Feishu, run it locally, reply with the ou
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-libc = "0.2"
 # macOS shell (tray + Settings window), gated behind the `tray` feature so a
 # pure headless artifact excludes the GUI dependency graph at build time.
 tauri = { version = "2", features = ["tray-icon", "image-png"], optional = true }
 rfd = { version = "0.15", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# Signal installation and process-group termination (src/main.rs, src/process.rs).
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Console-control handler so Ctrl+C drains like the Unix signal path (src/main.rs).
+ctrlc = "3"
 
 [build-dependencies]
 tauri-build = { version = "2", optional = true , features = [] }

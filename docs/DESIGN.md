@@ -10,7 +10,7 @@ The [product specification](product.md) owns user-visible behavior. The [menu ba
 
 ## Runtime
 
-Use one Rust package and one in-process runtime. Both artifacts (the macOS bundle and the headless binary) share configuration, the real user's `~/.slashie/` directory, and an exclusive OS lock on a stable `app.lock`. Hold the lock until shutdown and close its descriptor on subprocess exec. `slashie` launches the runtime. `lark-cli` provides external Feishu access.
+Use one Rust package and one in-process runtime. Both artifacts (the macOS bundle and the headless binary) share configuration, the real user's home runtime directory (`~/.slashie/`; `%USERPROFILE%\.slashie` on Windows), and an exclusive OS lock on a stable `app.lock` (`flock` on Unix, `LockFileEx` through `File::try_lock` on Windows). Hold the lock until shutdown and close its descriptor on subprocess exec. `slashie` launches the runtime. `lark-cli` provides external Feishu access.
 
 | Owner | Responsibility |
 | --- | --- |
@@ -26,7 +26,7 @@ Give each host a control handle for status, polling changes, and shutdown. A coo
 
 The macOS bundle starts in menu-bar mode and contains no foreground host; a headless build is foreground-only. Host selection is a build-time property of each artifact, with no runtime override. `--help`, `--version`, and the offline `route` subcommands exit before opening runtime files. The offline `log` subcommand also runs before the instance lock and opens only the operational log. The headless control command `--poll on|off` updates the same persisted polling setting as the menu under the lock, then exits. A headless lock conflict reports an error and exits.
 
-Menu Quit, Cmd+Q, and SIGINT/SIGTERM request shared shutdown. The menu-bar host exits after the runtime drains. Closing Settings only hides its window and leaves the runtime running. The host holds a user-initiated activity token so App Nap cannot suspend polling while no window is visible; idle system sleep is still allowed. Shutdown stops intake, cancels active Feishu calls, terminates and reaps the active command group, and releases the lock after cleanup. Abandoned claims remain consumed. Canceling a request after Feishu may have accepted it leaves delivery uncertain.
+Menu Quit, Cmd+Q, and SIGINT/SIGTERM request shared shutdown; on Windows, console control (Ctrl+C, console close) sets the same flag through a handler so the drain behaves the same. The menu-bar host exits after the runtime drains. Closing Settings only hides its window and leaves the runtime running. The host holds a user-initiated activity token so App Nap cannot suspend polling while no window is visible; idle system sleep is still allowed. Shutdown stops intake, cancels active Feishu calls, terminates and reaps the active command group, and releases the lock after cleanup. Abandoned claims remain consumed. Canceling a request after Feishu may have accepted it leaves delivery uncertain.
 
 ### Desktop build
 
@@ -35,7 +35,7 @@ Use Tauri 2 for the macOS shell. Enable `tray` only in native macOS builds. Gate
 | Artifact | Build and acceptance |
 | --- | --- |
 | macOS bundle | `cargo tauri build --features tray --bundles app,dmg`. Pushing a `v*` tag builds the bundle through the release workflow and publishes it on a GitHub Release. Run the [menu acceptance checks](menu-bar.md#acceptance) on the installed bundle. |
-| Headless binary | `cargo build --release --no-default-features`. Inspect `cargo tree --no-default-features --edges normal,build` for GUI dependencies. Build and run on Linux without a display session. |
+| Headless binary | `cargo build --release --no-default-features` on Linux, macOS (aarch64), and Windows (x86_64). Inspect `cargo tree --no-default-features --edges normal,build` for GUI dependencies. Build and run on Linux without a display session. Windows acceptance beyond CI is pending live validation. |
 | Shared runtime | Run the same controlled search and `/ping` cases through both artifacts (bundle and headless binary). Check lock contention and verify that switching artifacts preserves the polling setting and durable claims. |
 
 For v1.2, use a systemd user service under the authorized account. Invoke the foreground binary with the saved polling setting. Use `KillMode=mixed` and allow shared shutdown to finish within the stop timeout. Restart on unexpected failures. A lock conflict or unrecoverable startup fault requires operator action. Validate service credential access separately before promising operation outside a login session. [systemd service lifecycle](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html) · [systemd kill modes](https://www.freedesktop.org/software/systemd/man/latest/systemd.kill.html)
@@ -79,7 +79,7 @@ The search shortcut projects out placement fields and can report successful exit
 
 ## Command execution
 
-Run the trusted route program with `/bin/sh -c`. Pass message data through the environment variables below. The prompt is the argument text, a blank line, and the source. The shell program comes entirely from the local configuration.
+Run the trusted route program with `/bin/sh -c` (`sh -c` resolved from PATH on Windows, supplied by Git for Windows). Pass message data through the environment variables below. The prompt is the argument text, a blank line, and the source. The shell program comes entirely from the local configuration.
 
 | Variable | Value |
 | --- | --- |
@@ -96,7 +96,7 @@ Run the trusted route program with `/bin/sh -c`. Pass message data through the e
 
 Quote values that may contain whitespace. Commands consuming message data should expand the variables in quotes. The runtime never interpolates message text into the shell program.
 
-Close the command's stdin pipe writer to signal EOF. Give each subprocess its own Unix process group. Apply a bounded deadline to Feishu calls and each route's configured timeout to its command. On timeout, shutdown, or ordinary exit with surviving group members, send SIGTERM to the group, wait up to two seconds, then SIGKILL remaining members. Reap the direct child. A child that leaves the group is outside this guarantee. Bound the final pipe drain in case a detached child holds a pipe open. [Rust Unix process groups](https://doc.rust-lang.org/std/os/unix/process/trait.CommandExt.html#tymethod.process_group)
+Close the command's stdin pipe writer to signal EOF. Isolate each subprocess at spawn — its own Unix process group; a plain child on Windows. Apply a bounded deadline to Feishu calls and each route's configured timeout to its command. On timeout or shutdown, apply the graceful-then-force contract (`src/process.rs`): SIGTERM to the group — `taskkill /PID <pid> /T` on Windows — wait up to two seconds, then SIGKILL remaining members — `taskkill /T /F` on Windows. Reap the direct child. A child that leaves the group is outside this guarantee. The Windows liveness probe watches only the direct child; `taskkill /T /F` removes any pipe-holding survivor it might have left behind. Bound the final pipe drain in case a detached child holds a pipe open. [Rust Unix process groups](https://doc.rust-lang.org/std/os/unix/process/trait.CommandExt.html#tymethod.process_group)
 
 Drain stdout and stderr concurrently and keep at most 64 KiB of each in memory. Default `reply_mode: agent` delegates text sending to the target; software status reactions remain enabled in both modes. Explicit `auto` sends the outcome text described in the [product contract](product.md#trigger-and-reply). For diagnostics use stderr, then stdout if stderr is empty. Limit the complete reply to 4,000 Unicode characters and the verified API byte limit, including any truncation notice. Persist only operational metadata. Log command exit or timeout separately from reply sent, rejected, or uncertain.
 
@@ -134,7 +134,7 @@ Read and validate configuration at launch, and again whenever the file's modific
 
 On initial setup, the stock configuration includes `/ping` (runs `echo pong`; forwarded only in auto mode), `/pi` (Pi), `/claude` (Claude Code), and `/codex` (Codex). These are editable routes. Start with polling paused. Put the installed tools and any required runtime, such as Node, in `process_path`. The three agent routes use `session: "chat"` and switch to the agent's resume form when `SLASHIE_CONTINUE` is `1`. Their own conversation is resumed per chat or topic; reading the rest of the Feishu chat still requires a separate context tool.
 
-`poll_interval` is 10, 20, 30, or 60 seconds and defaults to 10. Each prefix is a unique slash-prefixed token. Each `cmd` is a nonempty shell program. An optional route `dir` is an absolute path or starts with `~/`. It defaults to the user's home directory. An optional `timeout` is a positive integer in seconds, defaulting to 30. An optional `session` may be `"chat"` for one agent session per conversation (chat or topic); it cannot be combined with `dir`. `process_path` contains ordered absolute directories and defaults to the example: the system dirs plus the common Homebrew prefixes, so the stock agent routes resolve without edits. A tool in a private directory (such as `~/.local/bin`) needs its directory added here.
+`poll_interval` is 10, 20, 30, or 60 seconds and defaults to 10. Each prefix is a unique slash-prefixed token. Each `cmd` is a nonempty shell program. An optional route `dir` is an absolute path or starts with `~/`. It defaults to the user's home directory. An optional `timeout` is a positive integer in seconds, defaulting to 30. An optional `session` may be `"chat"` for one agent session per conversation (chat or topic); it cannot be combined with `dir`. `process_path` contains ordered absolute directories and defaults to the example: on Unix, the system dirs plus the common Homebrew prefixes, so the stock agent routes resolve without edits; on Windows the default is empty, so a route command inherits the ambient PATH. A tool in a private directory (such as `~/.local/bin`) needs its directory added here. Windows additionally requires `sh` (Git for Windows) on the binary's own PATH for route resolution.
 
 | File | Source of truth |
 | --- | --- |

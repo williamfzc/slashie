@@ -112,15 +112,11 @@ impl LarkCliTransport {
         });
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
+        crate::process::isolate(&mut cmd);
 
         let mut child = cmd.spawn().map_err(|e| {
             CliFailure::Failed(format!("cannot spawn lark-cli: {}", e), String::new())
         })?;
-        let pgid = child.id() as i32;
         if let Some(data) = stdin_data {
             use std::io::Write;
             child
@@ -160,14 +156,14 @@ impl LarkCliTransport {
                 Err(e) => return Err(CliFailure::Uncertain(format!("wait failed: {}", e))),
             }
             if self.shutdown.load(Ordering::SeqCst) {
-                self.kill_group(pgid);
+                crate::process::terminate_tree(&mut child);
                 let _ = child.wait();
                 return Err(CliFailure::Uncertain(
                     "shutdown canceled a Feishu call; delivery may be uncertain".into(),
                 ));
             }
             if std::time::Instant::now() >= deadline {
-                self.kill_group(pgid);
+                crate::process::terminate_tree(&mut child);
                 let _ = child.wait();
                 return Err(CliFailure::Uncertain(format!(
                     "lark-cli call exceeded {}ms deadline",
@@ -232,22 +228,6 @@ impl LarkCliTransport {
             .ok_or_else(|| {
                 TransportError::Incomplete("Reaction response has no confirmed ID".into())
             })
-    }
-
-    fn kill_group(&self, pgid: i32) {
-        unsafe {
-            libc::kill(-pgid, libc::SIGTERM);
-        }
-        let wait_until = std::time::Instant::now() + Duration::from_millis(2000);
-        while std::time::Instant::now() < wait_until {
-            if unsafe { libc::kill(-pgid, 0) } != 0 {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        unsafe {
-            libc::kill(-pgid, libc::SIGKILL);
-        }
     }
 
     fn run_json(
@@ -814,7 +794,10 @@ impl Channel for LarkCliTransport {
     }
 }
 
-#[cfg(test)]
+// The boundary tests exec a fake lark-cli directly, which needs a Unix
+// exec convention (shebang script + chmod). Windows coverage of the
+// adapter's envelope handling is pending live validation.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

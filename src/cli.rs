@@ -224,7 +224,8 @@ pub fn skill(home: &Path) -> String {
          # Rules\n\
          \n\
          - PREFIX is unique across routes, starts with `/`, and is a single token.\n\
-         - COMMAND is a shell program run with `/bin/sh -c`. It receives the message\n\
+         - COMMAND is a shell program run with `/bin/sh -c` (on Windows, `sh -c`\n\
+         resolved from PATH, supplied by Git for Windows). It receives the message\n\
          text in `$SLASHIE_ARGS` (text after the prefix) and `$SLASHIE_PROMPT` (that\n\
          text plus the message source). Quote variables where the command expects\n\
          them, e.g. `claude -p -- \"$SLASHIE_PROMPT\"`.\n\
