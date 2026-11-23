@@ -34,6 +34,7 @@ Two layers, by [design](DESIGN.md):
 | Message text can never change the shell program | `worker::metacharacters_cannot_change_program` |
 | Exact source link; missing link blocks the handoff | `runtime::handoff_forwards_exact_source_link`, `lark::source_link_is_exact_and_missing_link_blocks_handoff` |
 | `OnIt` only after a durable claim; reaction failure never changes the work result | `lark::processing_reaction_targets_source_as_user`, `lark::reaction_failures_never_invent_ids_or_remove_unconfirmed_status`, `runtime::rejected_processing_reaction_still_runs_and_replies` |
+| Waiting work receives `OneSecond`, and only Slashie's confirmed queue marker is removed on start | `lark::queue_reaction_uses_supported_emoji_and_removes_only_its_id`, `runtime::first_job_is_on_it_and_later_same_chat_job_is_queued_then_cleared` |
 | `DONE` only for success; timeout/unavailable source gets `ERROR` | `runtime::timed_out_work_gets_error_not_done`, `runtime::unavailable_source_marks_error_without_starting_command`, `runtime::failed_agent_work_is_not_successful_silent_completion` |
 | Status reactions independent of `reply_mode` | `runtime::software_reactions_do_not_depend_on_agent_text_delivery` |
 | `agent` mode is default; `auto` is explicit | `config::agent_delivery_is_default_and_auto_is_explicit`, `transport::reply_modes` |
@@ -46,6 +47,8 @@ Two layers, by [design](DESIGN.md):
 | --- | --- |
 | Conversation key isolates chats and topics; workspace follows the key | `transport::channel_key_and_workspace_isolate_topics`, `state::chat_session_mapping_roundtrip` |
 | Same conversation resumes its agent session; others start fresh | `runtime::chat_session_continues_only_within_the_same_chat`, `worker::default_agent_routes_start_and_continue_in_the_right_order`, `worker::session_env_and_workspace_are_passed` |
+| Managed Codex waits for a verified active session, stops the original process, and resumes its exact ID | `config::steer_requires_the_stock_codex_managed_route`, `runtime::scan_requests_steering_only_for_immediate_bound_owner_follow_up`, `worker::managed_codex_stops_and_resumes_the_reported_session` |
+| An interrupted turn retries removal of its own acknowledgment without sending terminal success or failure | `runtime::interrupted_ack_clear_is_durable_and_retried_by_flush` |
 | Topic reply stays in its thread and its session | `runtime::topic_reply_maps_to_its_own_session_and_thread_reply`, `lark::reply_in_thread_passes_the_flag` |
 | Commands in one conversation run in order; conversations run in parallel | `mailbox::same_conversation_runs_in_order_different_conversations_interleave`, `mailbox::conversations_progress_in_parallel` |
 | Queue caps: bursts stay bounded, overflow is left for later scans, nothing claimed is stranded | `mailbox::full_mailbox_reports_full_and_new_conversations_exhaust`, `runtime::same_conversation_burst_is_capped_at_the_mailbox_not_silently_lost`, `runtime::queue_bound_leaves_candidates_unclaimed`, `runtime::conversation_slots_cap_claims_without_stranding_them` |

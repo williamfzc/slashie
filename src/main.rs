@@ -66,7 +66,7 @@ fn print_help() {
              route list        Print the route table as JSON.\n\
              route add <PREFIX> --cmd <COMMAND> [--dir <PATH>]\n\
                                [--timeout <SECS>] [--session chat]\n\
-                               [--allow-mentions]\n\
+                               [--allow-mentions] [--follow-up queue|steer]\n\
                                Add a route.\n\
              route remove <PREFIX>\n\
                                Remove a route.\n\

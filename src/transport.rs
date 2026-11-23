@@ -155,6 +155,14 @@ pub trait Channel: Send + Sync {
     /// Return only a confirmed reaction ID, so only our own status is removed.
     fn react_processing(&self, source_id: &str) -> Result<Option<String>, TransportError>;
 
+    fn react_queued(&self, source_id: &str) -> Result<Option<String>, TransportError> {
+        self.react_processing(source_id)
+    }
+
+    fn clear_acknowledgment(&self, _source_id: &str, _id: &str) -> Result<(), TransportError> {
+        Ok(())
+    }
+
     /// Software terminal state, independent of the target's text reply decision.
     fn react_finished(
         &self,
@@ -233,6 +241,10 @@ pub struct MockTransport {
     fixture: MockFixture,
     search_failures_left: std::sync::atomic::AtomicU32,
     pub reaction_attempts: std::sync::Mutex<Vec<String>>,
+    #[cfg(test)]
+    pub queued_reactions: std::sync::Mutex<Vec<String>>,
+    #[cfg(test)]
+    pub cleared_acknowledgments: std::sync::Mutex<Vec<(String, String)>>,
     pub terminal_reactions: std::sync::Mutex<Vec<(String, bool, Option<String>)>>,
     pub replies: std::sync::Mutex<Vec<ReplyRecord>>,
     #[cfg(test)]
@@ -247,6 +259,10 @@ impl MockTransport {
             fixture,
             search_failures_left: std::sync::atomic::AtomicU32::new(left),
             reaction_attempts: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            queued_reactions: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            cleared_acknowledgments: std::sync::Mutex::new(Vec::new()),
             terminal_reactions: std::sync::Mutex::new(Vec::new()),
             replies: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
@@ -344,6 +360,24 @@ impl Channel for MockTransport {
             return Err(TransportError::Fatal("mock reaction rejection".into()));
         }
         Ok(Some(format!("reaction-{}", source_id)))
+    }
+
+    fn react_queued(&self, source_id: &str) -> Result<Option<String>, TransportError> {
+        #[cfg(test)]
+        self.queued_reactions.lock().unwrap().push(source_id.into());
+        self.react_processing(source_id)
+    }
+
+    fn clear_acknowledgment(&self, _source_id: &str, _id: &str) -> Result<(), TransportError> {
+        #[cfg(test)]
+        self.cleared_acknowledgments
+            .lock()
+            .unwrap()
+            .push((_source_id.into(), _id.into()));
+        if self.fixture.behavior.reaction_rejected {
+            return Err(TransportError::Fatal("mock reaction rejection".into()));
+        }
+        Ok(())
     }
 
     fn react_finished(

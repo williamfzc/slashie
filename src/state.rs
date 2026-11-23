@@ -36,14 +36,20 @@ pub struct Claim {
     /// Confirmed software acknowledgment; absent for old state or denied writes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub processing_reaction_id: Option<String>,
+    /// Whether the owned acknowledgment is the queued marker rather than OnIt.
+    #[serde(default)]
+    pub queued_reaction: bool,
+    /// Deferred removal of an acknowledgment after an interrupted run.
+    #[serde(default)]
+    pub acknowledgment_clear_pending: bool,
     /// Deferred terminal status: persisted work succeeded/failed, no command replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_reaction_pending: Option<bool>,
 }
 
 /// One chat route that already has a local agent session. The workspace is
-/// derived from `chat_id`; this record only decides whether the next command
-/// may resume the session (`SLASHIE_CONTINUE=1`).
+/// derived from the conversation key. Managed Codex routes also save the
+/// exact session to resume after an interruption.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatSession {
     #[serde(default = "default_channel")]
@@ -53,6 +59,8 @@ pub struct ChatSession {
     pub topic_id: Option<String>,
     pub prefix: String,
     pub last_success_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -189,6 +197,8 @@ impl State {
             outcome: None,
             reply_id: None,
             processing_reaction_id: None,
+            queued_reaction: false,
+            acknowledgment_clear_pending: false,
             terminal_reaction_pending: None,
         });
     }
@@ -235,8 +245,7 @@ impl State {
             && session.prefix == prefix
     }
 
-    /// True when this conversation route has completed a command successfully
-    /// and may resume its agent session.
+    /// True when this conversation route may resume its agent session.
     pub fn has_chat_session(&self, key: &ConversationKey, prefix: &str) -> bool {
         self.chat_sessions
             .iter()
@@ -246,23 +255,42 @@ impl State {
     /// Remember that the conversation route now has a session. The timestamp
     /// only moves forward.
     pub fn record_chat_session(&mut self, key: &ConversationKey, prefix: &str, now_ms: i64) {
-        if let Some(session) = self
+        let session = self.chat_session(key, prefix);
+        session.last_success_ms = now_ms.max(session.last_success_ms);
+        // Unmanaged execution can select another local session. Managed runs
+        // replace this with the ID they actually observed.
+        session.codex_session_id = None;
+    }
+
+    pub fn codex_session_id(&self, key: &ConversationKey, prefix: &str) -> Option<&str> {
+        self.chat_sessions
+            .iter()
+            .find(|s| Self::session_matches(s, key, prefix))?
+            .codex_session_id
+            .as_deref()
+    }
+
+    pub fn record_codex_session(&mut self, key: &ConversationKey, prefix: &str, id: String) {
+        self.chat_session(key, prefix).codex_session_id = Some(id);
+    }
+
+    fn chat_session(&mut self, key: &ConversationKey, prefix: &str) -> &mut ChatSession {
+        if let Some(index) = self
             .chat_sessions
-            .iter_mut()
-            .find(|s| Self::session_matches(s, key, prefix))
+            .iter()
+            .position(|s| Self::session_matches(s, key, prefix))
         {
-            if now_ms > session.last_success_ms {
-                session.last_success_ms = now_ms;
-            }
-        } else {
-            self.chat_sessions.push(ChatSession {
-                channel: key.channel.clone(),
-                chat_id: key.chat_id.clone(),
-                topic_id: key.topic_id.clone(),
-                prefix: prefix.to_string(),
-                last_success_ms: now_ms,
-            });
+            return &mut self.chat_sessions[index];
         }
+        self.chat_sessions.push(ChatSession {
+            channel: key.channel.clone(),
+            chat_id: key.chat_id.clone(),
+            topic_id: key.topic_id.clone(),
+            prefix: prefix.to_string(),
+            last_success_ms: 0,
+            codex_session_id: None,
+        });
+        self.chat_sessions.last_mut().unwrap()
     }
 }
 

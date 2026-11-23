@@ -9,10 +9,10 @@
 
 use crate::config::Route;
 use crate::transport::{ConversationKey, Message};
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub const MAX_CAPTURE_BYTES: usize = 64 * 1024;
 pub const MAX_REPLY_CHARS: usize = 4000;
@@ -44,7 +44,7 @@ fn latest_capture(
 
 pub struct Outcome {
     pub reply_text: String,
-    /// "exit", "timeout", "shutdown"
+    /// "exit", "timeout", "shutdown", or "interrupted"
     pub termination: String,
     pub exit_code: Option<i32>,
     pub duration_ms: u64,
@@ -110,6 +110,139 @@ pub struct SessionEnv {
     pub topic_id: String,
     pub dir: Option<std::path::PathBuf>,
     pub continuing: bool,
+    pub steering: Option<Arc<Steering>>,
+    pub codex_resume_id: Option<String>,
+}
+
+/// Handshake between intake and the active managed Codex worker.
+#[derive(Debug, Default)]
+pub struct Steering {
+    session: Mutex<SteeringSession>,
+    requested: AtomicBool,
+}
+
+#[derive(Debug, Default)]
+struct SteeringSession {
+    id: Option<String>,
+    interruptible: bool,
+}
+
+impl Steering {
+    pub fn session_id(&self) -> Option<String> {
+        self.session.lock().unwrap().id.clone()
+    }
+
+    pub fn request(&self) -> bool {
+        self.session.lock().unwrap().interruptible && !self.requested.swap(true, Ordering::SeqCst)
+    }
+
+    pub(crate) fn observe_session_id(&self, id: String) {
+        if is_session_id(&id) {
+            let mut session = self.session.lock().unwrap();
+            session.id.get_or_insert(id);
+            session.interruptible = true;
+        }
+    }
+
+    fn finish_turn(&self, id: Option<String>) {
+        let mut session = self.session.lock().unwrap();
+        if let Some(id) = id {
+            session.id.get_or_insert(id);
+        }
+        session.interruptible = false;
+    }
+}
+
+fn is_session_id(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
+}
+
+/// Read bounded JSONL records without allowing a long tool output to stop
+/// observing later session and reply events.
+fn capture_codex(
+    pipe: impl Read,
+    steering: &Steering,
+    expected_id: Option<&str>,
+    output: std::sync::mpsc::Sender<Vec<u8>>,
+) {
+    let mut reader = BufReader::new(pipe);
+    let mut line = Vec::new();
+    let mut discard = false;
+    let mut id = None;
+    let mut in_turn = false;
+    loop {
+        line.clear();
+        let n = match reader
+            .by_ref()
+            .take(MAX_CAPTURE_BYTES as u64)
+            .read_until(b'\n', &mut line)
+        {
+            Ok(n) if n > 0 => n,
+            _ => break,
+        };
+        if n == MAX_CAPTURE_BYTES && !line.ends_with(b"\n") {
+            discard = true;
+            continue;
+        }
+        if std::mem::take(&mut discard) {
+            continue;
+        }
+        let Ok(event) = serde_json::from_slice::<serde_json::Value>(&line) else {
+            continue;
+        };
+        match event.get("type").and_then(serde_json::Value::as_str) {
+            Some("thread.started") => {
+                id = event
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| {
+                        is_session_id(id) && expected_id.is_none_or(|expected| expected == *id)
+                    })
+                    .map(str::to_string);
+            }
+            Some("turn.started") => in_turn = true,
+            // A thread ID alone can arrive before Codex records the first turn.
+            Some("item.started") if in_turn => {
+                if let Some(id) = id.take() {
+                    steering.observe_session_id(id);
+                }
+            }
+            Some("item.completed") if in_turn => {
+                if event
+                    .pointer("/item/type")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("agent_message")
+                {
+                    if let Some(text) = event
+                        .pointer("/item/text")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        let _ = output.send(text.as_bytes().to_vec());
+                    }
+                }
+            }
+            Some("turn.completed") => {
+                in_turn = false;
+                steering.finish_turn(id.take());
+            }
+            Some("turn.failed") => {
+                in_turn = false;
+                steering.finish_turn(None);
+                if let Some(message) = event
+                    .pointer("/error/message")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    let _ = output.send(message.as_bytes().to_vec());
+                }
+            }
+            _ => {}
+        }
+    }
+    steering.finish_turn(None);
 }
 
 /// Build the reply text per the product contract: stdout on success, a short
@@ -197,7 +330,21 @@ pub fn run_command_with(
     let mut cmd = Command::new("sh");
     #[cfg(not(windows))]
     let mut cmd = Command::new("/bin/sh");
-    cmd.arg("-c").arg(&route.cmd);
+    let steering = session.steering.clone().filter(|_| session.dir.is_some());
+    let expected_id = session.codex_resume_id.clone();
+    let program = if steering.is_some() {
+        if let Some(id) = &expected_id {
+            cmd.env("SLASHIE_CODEX_SESSION_ID", id);
+            r#"exec codex exec resume --json --skip-git-repo-check -- "$SLASHIE_CODEX_SESSION_ID" "$SLASHIE_PROMPT""#
+        } else if session.continuing {
+            r#"exec codex exec resume --last --json --skip-git-repo-check -- "$SLASHIE_PROMPT""#
+        } else {
+            r#"exec codex exec --json --skip-git-repo-check -- "$SLASHIE_PROMPT""#
+        }
+    } else {
+        &route.cmd
+    };
+    cmd.arg("-c").arg(program);
     cmd.env("SLASHIE_ARGS", &inputs.args);
     cmd.env("SLASHIE_PROMPT", &inputs.prompt);
     cmd.env("SLASHIE_ID", &inputs.id);
@@ -272,7 +419,12 @@ pub fn run_command_with(
     // keeps a pipe open must not stall settlement forever.
     let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
     let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+    let output_steering = steering.clone();
     let t1 = std::thread::spawn(move || {
+        if let Some(steering) = output_steering {
+            capture_codex(stdout_pipe, &steering, expected_id.as_deref(), stdout_tx);
+            return;
+        }
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
         loop {
@@ -330,6 +482,13 @@ pub fn run_command_with(
             termination = "shutdown".into();
             break;
         }
+        if steering
+            .as_ref()
+            .is_some_and(|steering| steering.requested.load(Ordering::SeqCst))
+        {
+            termination = "interrupted".into();
+            break;
+        }
         if std::time::Instant::now() >= deadline {
             termination = "timeout".into();
             timed_out = true;
@@ -338,7 +497,7 @@ pub fn run_command_with(
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 
-    if timed_out || termination == "shutdown" {
+    if timed_out || termination == "shutdown" || termination == "interrupted" {
         // SIGTERM the group, wait up to 2s, SIGKILL survivors (taskkill
         // graceful-then-force on Windows).
         crate::process::terminate_tree(&mut child);
@@ -364,7 +523,9 @@ pub fn run_command_with(
     };
     let success = !timed_out && termination != "shutdown" && exit_code == Some(0);
 
-    let reply_text = if termination == "shutdown" {
+    let reply_text = if termination == "interrupted" {
+        "Interrupted by a follow-up.".to_string()
+    } else if termination == "shutdown" {
         // A quit killed this command (running or queued); that is not an
         // ordinary command failure and must read as one to the user.
         "Canceled: Slashie is shutting down.".to_string()
@@ -391,6 +552,7 @@ mod tests {
             dir: None,
             timeout: None,
             allow_mentions: false,
+            follow_up: Default::default(),
             session: None,
         }
     }
@@ -460,6 +622,83 @@ mod tests {
         assert!(inputs.source.contains("sender: ou_friend"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn managed_codex_stops_and_resumes_the_reported_session() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        const ID: &str = "83d0f53a-1ae9-4b2a-81ea-216aedc12345";
+        let dir = std::env::temp_dir().join(format!("slashie-steer-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let tool = dir.join("codex");
+        std::fs::write(
+            &tool,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' '{{"type":"thread.started","thread_id":"{ID}"}}' '{{"type":"turn.started"}}'
+if [ "$2" = resume ]; then
+    [ "$6" = "{ID}" ] && [ "$7" = "follow-up" ] || exit 2
+    printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":"continued"}}}}' '{{"type":"turn.completed"}}'
+else
+    printf '%s\n' '{{"type":"item.started","item":{{"type":"command_execution"}}}}'
+    exec /bin/sleep 20
+fi
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut route = crate::config::Config::default()
+            .routes
+            .into_iter()
+            .find(|route| route.prefix == "/codex")
+            .unwrap();
+        route.follow_up = crate::config::FollowUp::Steer;
+        route.timeout = Some(6);
+        let run = |steering: Arc<Steering>, resume_id: Option<String>, prompt: &str| {
+            let path = vec![dir.to_str().unwrap().to_string()];
+            run_command_with(
+                &route,
+                &CommandInputs {
+                    args: String::new(),
+                    prompt: prompt.into(),
+                    source: String::new(),
+                    id: String::new(),
+                    link: String::new(),
+                },
+                &SessionEnv {
+                    dir: Some(dir.clone()),
+                    steering: Some(steering),
+                    codex_resume_id: resume_id,
+                    ..SessionEnv::default()
+                },
+                &path,
+                "/tmp",
+                Arc::new(AtomicBool::new(false)),
+            )
+        };
+        let steering = Arc::new(Steering::default());
+        let interrupted = std::thread::scope(|scope| {
+            let running = scope.spawn(|| run(steering.clone(), None, "first request"));
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while steering.session_id().is_none() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(steering.request());
+            running.join().unwrap()
+        });
+        assert_eq!(interrupted.termination, "interrupted");
+        assert_eq!(interrupted.exit_code, None);
+        let resumed = Arc::new(Steering::default());
+        let follow_up = run(resumed.clone(), steering.session_id(), "follow-up");
+        assert_eq!(follow_up.exit_code, Some(0));
+        assert_eq!(follow_up.reply_text, "continued");
+        assert_eq!(resumed.session_id().as_deref(), Some(ID));
+        assert!(!resumed.request());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn default_agent_routes_start_and_continue_in_the_right_order() {
         let dir = std::env::temp_dir().join(format!("slashie-agent-flags-{}", std::process::id()));
@@ -495,6 +734,7 @@ mod tests {
                 topic_id: String::new(),
                 dir: None,
                 continuing,
+                ..SessionEnv::default()
             };
             run_command_with(
                 route,
@@ -575,6 +815,7 @@ mod tests {
             topic_id: "omt_topic".into(),
             dir: Some(dir.clone()),
             continuing: true,
+            ..SessionEnv::default()
         };
         let inputs = CommandInputs {
             args: "a".into(),

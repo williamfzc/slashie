@@ -759,6 +759,31 @@ impl Channel for LarkCliTransport {
         self.create_reaction(source_id, "OnIt").map(Some)
     }
 
+    fn react_queued(&self, source_id: &str) -> Result<Option<String>, TransportError> {
+        self.create_reaction(source_id, "OneSecond").map(Some)
+    }
+
+    fn clear_acknowledgment(&self, source_id: &str, id: &str) -> Result<(), TransportError> {
+        let params = json!({"message_id": source_id, "reaction_id": id});
+        let envelope = self
+            .run_json(
+                &[
+                    "im",
+                    "reactions",
+                    "delete",
+                    "--as",
+                    "user",
+                    "--params",
+                    &params.to_string(),
+                ],
+                None,
+                REACTION_TIMEOUT_MS,
+            )
+            .map_err(cli_failure_to_transport)?;
+        api_data(&envelope)?;
+        Ok(())
+    }
+
     fn react_finished(
         &self,
         source_id: &str,
@@ -768,23 +793,7 @@ impl Channel for LarkCliTransport {
         // Add the truthful terminal state first; failed writes must keep OnIt.
         self.create_reaction(source_id, if succeeded { "DONE" } else { "ERROR" })?;
         if let Some(id) = processing_id {
-            let params = json!({"message_id": source_id, "reaction_id": id});
-            let envelope = self
-                .run_json(
-                    &[
-                        "im",
-                        "reactions",
-                        "delete",
-                        "--as",
-                        "user",
-                        "--params",
-                        &params.to_string(),
-                    ],
-                    None,
-                    REACTION_TIMEOUT_MS,
-                )
-                .map_err(cli_failure_to_transport)?;
-            api_data(&envelope)?;
+            self.clear_acknowledgment(source_id, id)?;
         }
         Ok(())
     }
@@ -1014,7 +1023,7 @@ if args[:3] == ["im", "reactions", "create"]:
     assert params["message_id"] == "om_reaction_source"
     assert args[7:] == ["--data", "-"]
     emoji = stdin_arg("--data")["reaction_type"]["emoji_type"]
-    assert emoji in ["OnIt", "DONE", "ERROR"]
+    assert emoji in ["OnIt", "OneSecond", "DONE", "ERROR"]
     if profile == "reaction-missing-id":
         print(json.dumps({"ok": True, "data": {}})); sys.exit(0)
     if profile == "reaction-terminal-denied" and emoji != "OnIt":
@@ -1025,7 +1034,9 @@ if args[:3] == ["im", "reactions", "create"]:
 if args[:3] == ["im", "reactions", "delete"]:
     assert profile in ["reaction-test", "reaction-delete-denied"]
     assert args[3:6] == ["--as", "user", "--params"]
-    assert json.loads(args[6]) == {"message_id": "om_reaction_source", "reaction_id": "reaction_OnIt"}
+    params = json.loads(args[6])
+    assert params["message_id"] == "om_reaction_source"
+    assert params["reaction_id"] in ["reaction_OnIt", "reaction_OneSecond"]
     # A second author's same emoji must not be queried or removed by name.
     assert "reaction_other_author_OnIt" not in args[6]
     if profile == "reaction-delete-denied":
@@ -1145,6 +1156,16 @@ sys.exit(0)
         t.react_finished("om_reaction_source", true, id.as_deref())
             .unwrap();
         t.react_finished("om_reaction_source", false, None).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn queue_reaction_uses_supported_emoji_and_removes_only_its_id() {
+        let dir = tmp("queued_reaction");
+        let t = transport_in(&dir, "reaction-test");
+        let id = t.react_queued("om_reaction_source").unwrap().unwrap();
+        assert_eq!(id, "reaction_OneSecond");
+        t.clear_acknowledgment("om_reaction_source", &id).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

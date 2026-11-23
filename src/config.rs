@@ -15,6 +15,8 @@ pub const MAX_POLL_INTERVAL: u64 = 60;
 /// Slashie never forces a reply.
 pub const DEFAULT_DELIVERY_HINT: &str = "先读上下文，再决定是否回复原消息。";
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
+/// The only command eligible for managed Codex follow-up steering.
+pub const STOCK_CODEX_COMMAND: &str = r#"if [ "$SLASHIE_CONTINUE" = 1 ]; then codex exec resume --last --skip-git-repo-check -- "$SLASHIE_PROMPT"; else codex exec --skip-git-repo-check -- "$SLASHIE_PROMPT"; fi"#;
 /// System dirs plus the common Homebrew prefixes, so the stock agent
 /// routes (`claude`, `codex`, `pi`) resolve on a normal machine without
 /// hand-editing config.json (DESIGN.md "Configuration and files").
@@ -54,11 +56,28 @@ pub struct Route {
     /// Include messages that explicitly mention the bound Feishu user.
     #[serde(default)]
     pub allow_mentions: bool,
+    /// Follow-up handling for a managed agent session.
+    #[serde(default, skip_serializing_if = "FollowUp::is_queue")]
+    pub follow_up: FollowUp,
     /// Opt into one persistent agent session per Feishu chat. The only
     /// supported value is "chat"; the route then runs in a Slashie-owned
     /// workspace and receives SLASHIE_CONTINUE.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FollowUp {
+    #[default]
+    Queue,
+    Steer,
+}
+
+impl FollowUp {
+    fn is_queue(value: &Self) -> bool {
+        matches!(value, Self::Queue)
+    }
 }
 
 /// Agent owns delivery by default; legacy stdout forwarding is opt-in.
@@ -115,7 +134,7 @@ if [ "$SLASHIE_CONTINUE" = 1 ]; then printf '%s' "$SLASHIE_PROMPT" | "$tool" -p 
                 ),
                 (
                     "/codex",
-                    r#"if [ "$SLASHIE_CONTINUE" = 1 ]; then codex exec resume --last --skip-git-repo-check -- "$SLASHIE_PROMPT"; else codex exec --skip-git-repo-check -- "$SLASHIE_PROMPT"; fi"#,
+                    STOCK_CODEX_COMMAND,
                     Some(120),
                     Some("chat"),
                 ),
@@ -127,6 +146,7 @@ if [ "$SLASHIE_CONTINUE" = 1 ]; then printf '%s' "$SLASHIE_PROMPT" | "$tool" -p 
                 dir: None,
                 timeout,
                 allow_mentions: false,
+                follow_up: FollowUp::Queue,
                 session: session.map(str::to_string),
             })
             .collect(),
@@ -216,6 +236,16 @@ pub fn validate(cfg: &Config) -> Result<(), ConfigError> {
                     p
                 ));
             }
+        }
+        if route.follow_up == FollowUp::Steer
+            && (p != "/codex"
+                || route.session.as_deref() != Some("chat")
+                || route.cmd != STOCK_CODEX_COMMAND)
+        {
+            return err(format!(
+                "route {:?} follow_up steer requires session chat and the stock /codex command",
+                p
+            ));
         }
     }
     for dir in &cfg.process_path {
@@ -462,6 +492,7 @@ mod tests {
                     dir: None,
                     timeout: None,
                     allow_mentions: false,
+                    follow_up: FollowUp::Queue,
                     session: None,
                 },
                 Route {
@@ -470,6 +501,7 @@ mod tests {
                     dir: None,
                     timeout: None,
                     allow_mentions: false,
+                    follow_up: FollowUp::Queue,
                     session: None,
                 },
             ],
@@ -566,6 +598,26 @@ mod tests {
             Config::parse(r#"{"poll_interval":10,"routes":[{"prefix":"/x","cmd":"echo hi"}]}"#)
                 .unwrap();
         assert!(!cfg.routes[0].allow_mentions);
+        assert!(!serde_json::to_string(&cfg).unwrap().contains("follow_up"));
+    }
+
+    #[test]
+    fn steer_requires_the_stock_codex_managed_route() {
+        let mut cfg = Config::default();
+        let codex = cfg
+            .routes
+            .iter_mut()
+            .find(|r| r.prefix == "/codex")
+            .unwrap();
+        codex.follow_up = FollowUp::Steer;
+        validate(&cfg).unwrap();
+
+        let mut invalid = cfg.clone();
+        invalid.routes[3].cmd = "codex exec --skip-git-repo-check".into();
+        assert!(validate(&invalid).is_err());
+        let mut invalid = cfg;
+        invalid.routes[3].session = None;
+        assert!(validate(&invalid).is_err());
     }
 
     #[test]

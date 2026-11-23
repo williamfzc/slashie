@@ -6,12 +6,12 @@
 //! Both work while the app runs: route edits hot-reload at the next scan,
 //! and the log read never touches runtime state.
 
-use crate::config::{atomic_write, route_prefix_problem, Config, Route};
+use crate::config::{atomic_write, route_prefix_problem, Config, FollowUp, Route};
 use std::path::Path;
 
 const ROUTE_USAGE: &str = "usage:\n  \
      slashie route list\n  \
-     slashie route add <PREFIX> --cmd <COMMAND> [--dir <PATH>] [--timeout <SECS>] [--session chat] [--allow-mentions]\n  \
+     slashie route add <PREFIX> --cmd <COMMAND> [--dir <PATH>] [--timeout <SECS>] [--session chat] [--allow-mentions] [--follow-up queue|steer]\n  \
      slashie route remove <PREFIX>";
 
 const LOG_USAGE: &str = "usage:\n  \
@@ -45,6 +45,7 @@ fn add(home: &Path, args: &mut impl Iterator<Item = String>) -> Result<String, S
     let mut dir: Option<String> = None;
     let mut timeout: Option<u64> = None;
     let mut allow_mentions = false;
+    let mut follow_up = FollowUp::Queue;
     let mut session: Option<String> = None;
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -61,6 +62,15 @@ fn add(home: &Path, args: &mut impl Iterator<Item = String>) -> Result<String, S
             }
             "--session" => session = Some(next_value(args, "--session")?),
             "--allow-mentions" => allow_mentions = true,
+            "--follow-up" => {
+                follow_up = match next_value(args, "--follow-up")?.as_str() {
+                    "queue" => FollowUp::Queue,
+                    "steer" => FollowUp::Steer,
+                    other => {
+                        return Err(format!("--follow-up expects queue|steer, got {:?}", other))
+                    }
+                };
+            }
             other => {
                 return Err(format!(
                     "unknown route add flag {:?}\n{}",
@@ -91,6 +101,7 @@ fn add(home: &Path, args: &mut impl Iterator<Item = String>) -> Result<String, S
         dir,
         timeout,
         allow_mentions,
+        follow_up,
         session,
     });
     save_config(home, &cfg)?;
@@ -219,7 +230,7 @@ pub fn skill(home: &Path) -> String {
          # Commands\n\
          \n\
          - `slashie route list` - print the route table as JSON.\n\
-         - `slashie route add <PREFIX> --cmd <COMMAND> [--dir <PATH>] [--timeout <SECS>] [--session chat] [--allow-mentions]`\n\
+         - `slashie route add <PREFIX> --cmd <COMMAND> [--dir <PATH>] [--timeout <SECS>] [--session chat] [--allow-mentions] [--follow-up queue|steer]`\n\
          - `slashie route remove <PREFIX>`\n\
          - `slashie log [--last N] [--id MESSAGE_ID]` - print recent operational log\n\
          entries (timestamps, IDs, outcomes); works while Slashie is running.\n\
@@ -240,6 +251,8 @@ pub fn skill(home: &Path) -> String {
          - `--allow-mentions` lets other users run this route by sending\n\
          `@you /command` in any searchable group. Enable it only for commands\n\
          suitable for other group members to run with your local permissions.\n\
+         - `--follow-up steer` is owner-only: it is accepted only for the stock\n\
+         `/codex` route with `--session chat`; all other routes must queue follow-ups.\n\
          \n\
          # Behavior\n\
          \n\
@@ -339,6 +352,36 @@ mod tests {
         assert!(duplicate.contains("already exists"), "{}", duplicate);
         let bad = run(&home, &["add", "deploy", "--cmd", "echo hi"]).unwrap_err();
         assert!(bad.contains("must start with"), "{}", bad);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn follow_up_flag_is_parsed_and_validated() {
+        let home = temp_home("follow-up");
+        run(&home, &["remove", "/codex"]).unwrap();
+        run(
+            &home,
+            &[
+                "add",
+                "/codex",
+                "--cmd",
+                crate::config::STOCK_CODEX_COMMAND,
+                "--session",
+                "chat",
+                "--follow-up",
+                "steer",
+            ],
+        )
+        .unwrap();
+        let cfg = load_or_default(&home).unwrap();
+        assert_eq!(
+            cfg.routes
+                .iter()
+                .find(|route| route.prefix == "/codex")
+                .unwrap()
+                .follow_up,
+            FollowUp::Steer
+        );
         std::fs::remove_dir_all(home).unwrap();
     }
 

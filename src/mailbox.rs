@@ -120,6 +120,20 @@ impl Mailboxes {
         self.registry.lock().unwrap().map.contains_key(key)
     }
 
+    /// Number of accepted jobs currently occupying a conversation mailbox.
+    /// Unlike `is_tracked`, this stays zero for an idle mailbox that has not
+    /// retired yet, so admission can distinguish immediate work from queued
+    /// work precisely.
+    pub fn waiting(&self, key: &ConversationKey) -> usize {
+        self.registry
+            .lock()
+            .unwrap()
+            .map
+            .get(key)
+            .map(|mailbox| mailbox.waiting)
+            .unwrap_or(0)
+    }
+
     /// Enqueue jobs into their conversation mailboxes in the given order,
     /// spawning a worker for each new conversation. Callers claim durably
     /// and check `room` before claiming, so every job here has a mailbox.
@@ -330,6 +344,7 @@ mod tests {
                 dir: None,
                 timeout: None,
                 allow_mentions: false,
+                follow_up: crate::config::FollowUp::Queue,
                 session: None,
             },
         }

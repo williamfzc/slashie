@@ -5,7 +5,7 @@
 //! on one state mutex; claim updates and pause are persisted before work is
 //! handed off.
 
-use crate::config::{Config, ReplyMode, Route, DEFAULT_TIMEOUT_SECS};
+use crate::config::{Config, FollowUp, ReplyMode, Route, DEFAULT_TIMEOUT_SECS};
 use crate::logging::{now_ms, Logger};
 use crate::state::{load_or_init, save, ClaimStatus, State, StateLoad};
 use crate::transport::{Channel, TransportError};
@@ -77,6 +77,10 @@ pub struct Runtime {
     /// mailbox runner can call back into `process_job` without an `Arc`
     /// cycle (runtime -> mailboxes -> runner -> runtime).
     self_arc: Mutex<Option<std::sync::Weak<Runtime>>>,
+    /// Active managed Codex sessions, keyed by conversation.
+    steering: Mutex<
+        std::collections::HashMap<crate::transport::ConversationKey, Arc<crate::worker::Steering>>,
+    >,
     /// True when this run created state.json: hosts use it to offer
     /// first-run guidance (menu-bar.md).
     pub fresh_install: bool,
@@ -170,6 +174,7 @@ impl Runtime {
             intake_blocked: Mutex::new(blocked),
             status,
             self_arc: Mutex::new(None),
+            steering: Mutex::new(std::collections::HashMap::new()),
             fresh_install,
             next_scan_at: Mutex::new(None),
             terminal_flush: Mutex::new(()),
@@ -398,14 +403,16 @@ impl Runtime {
             let pending: Vec<_> = st
                 .claims
                 .iter()
-                .filter_map(|c| {
-                    c.terminal_reaction_pending.map(|success| {
-                        (
-                            c.message_id.clone(),
-                            success,
-                            c.processing_reaction_id.clone(),
-                        )
-                    })
+                .filter(|c| {
+                    c.terminal_reaction_pending.is_some()
+                        || (c.acknowledgment_clear_pending && c.processing_reaction_id.is_some())
+                })
+                .map(|c| {
+                    (
+                        c.message_id.clone(),
+                        c.terminal_reaction_pending,
+                        c.processing_reaction_id.clone(),
+                    )
                 })
                 .collect();
             if pending.is_empty() {
@@ -422,14 +429,24 @@ impl Runtime {
             if self.shutdown.load(Ordering::SeqCst) {
                 break;
             }
-            match self
-                .transport
-                .react_finished(&id, succeeded, processing_id.as_deref())
-            {
+            let result = match (succeeded, processing_id.as_deref()) {
+                (Some(success), acknowledgment) => {
+                    self.transport.react_finished(&id, success, acknowledgment)
+                }
+                (None, Some(acknowledgment)) => {
+                    self.transport.clear_acknowledgment(&id, acknowledgment)
+                }
+                (None, None) => continue,
+            };
+            match result {
                 Ok(()) => {
                     let mut st = self.state.lock().unwrap();
                     if let Some(c) = st.claims.iter_mut().find(|c| c.message_id == id) {
                         c.terminal_reaction_pending = None;
+                        c.acknowledgment_clear_pending = false;
+                        if succeeded.is_none() {
+                            c.processing_reaction_id = None;
+                        }
                     }
                     if let Err(e) = self.persist_state(&st) {
                         self.logger.log(&format!(
@@ -572,6 +589,7 @@ impl Runtime {
             // the job; the mailbox it names must have room before claiming.
             let key = self.transport.conversation_key(&m);
             let extra = claimed_per_key.get(&key).copied().unwrap_or(0);
+            let waiting = self.mailboxes.waiting(&key);
             match self.mailboxes.room(&key, extra, promised_new) {
                 crate::mailbox::Room::Available => {}
                 crate::mailbox::Room::MailboxFull => {
@@ -611,6 +629,9 @@ impl Runtime {
                 // memory, and must not discard earlier durable jobs in this scan.
                 let mut candidate = st.clone();
                 candidate.add_claim(&m.id, now_ms());
+                if let Some(claim) = candidate.claims.last_mut() {
+                    claim.queued_reaction = extra > 0 || waiting > 0;
+                }
                 if let Err(e) = self.persist_state(&candidate) {
                     self.logger
                         .log(&format!("ERROR cannot persist claim for {}: {}", m.id, e));
@@ -620,10 +641,30 @@ impl Runtime {
             }
             self.logger
                 .log(&format!("claimed {} for route {}", m.id, route.prefix));
-            // Software acceptance is independent of Agent text delivery. Never
-            // hold the state mutex during network I/O or acknowledge before save.
+            // A steer request remains a normal FIFO job. It may interrupt
+            // only the active immediate predecessor, never work already
+            // queued ahead of it.
+            if route.follow_up == FollowUp::Steer
+                && m.sender == self.identity
+                && extra == 0
+                && waiting == 1
+            {
+                if let Some(steering) = self.steering.lock().unwrap().get(&key).cloned() {
+                    let _ = steering.request();
+                }
+            }
+            // Software acceptance is independent of Agent text delivery. A
+            // job behind existing work gets the queue reaction; the first job
+            // keeps the immediate OnIt reaction. Both use one durable owned
+            // reaction ID, which the worker removes at the relevant boundary.
             if !self.shutdown.load(Ordering::SeqCst) {
-                match self.transport.react_processing(&m.id) {
+                let queued = extra > 0 || waiting > 0;
+                let reaction = if queued {
+                    self.transport.react_queued(&m.id)
+                } else {
+                    self.transport.react_processing(&m.id)
+                };
+                match reaction {
                     Ok(Some(id)) => {
                         let mut st = self.state.lock().unwrap();
                         if let Some(claim) = st.claims.iter_mut().find(|c| c.message_id == m.id) {
@@ -671,6 +712,7 @@ impl Runtime {
             st.claims.retain(|c| {
                 !(c.status == ClaimStatus::Settled
                     && c.terminal_reaction_pending.is_none()
+                    && !c.acknowledgment_clear_pending
                     && c.settled_at_ms.map(|t| t < horizon).unwrap_or(false))
             });
             if let Err(e) = save(&self.home, &st) {
@@ -692,10 +734,30 @@ impl Runtime {
         let auto_reply = self.config.lock().unwrap().reply_mode == ReplyMode::Auto;
         // Fixed at admission; a config swap mid-queue never reroutes a job.
         let key = job.key.clone();
+        let steering = if job.route.follow_up == FollowUp::Steer {
+            let mut active = self.steering.lock().unwrap();
+            active
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(crate::worker::Steering::default()))
+                .clone()
+        } else {
+            Arc::new(crate::worker::Steering::default())
+        };
+        let codex_resume_id = if job.route.follow_up == FollowUp::Steer {
+            self.state
+                .lock()
+                .unwrap()
+                .codex_session_id(&key, &job.route.prefix)
+                .map(str::to_string)
+        } else {
+            None
+        };
         let mut session = SessionEnv {
             channel: key.channel.clone(),
             chat_id: key.chat_id.clone(),
             topic_id: key.topic_id.clone().unwrap_or_default(),
+            steering: (job.route.follow_up == FollowUp::Steer).then_some(steering.clone()),
+            codex_resume_id,
             ..SessionEnv::default()
         };
         if job.route.session.as_deref() == Some("chat") {
@@ -720,6 +782,35 @@ impl Runtime {
                         job.message.id, e
                     )),
                 }
+            }
+        }
+        // A queued marker is only useful until this job starts. Remove it
+        // before execution, retaining the durable ID if the clear fails so
+        // terminal cleanup can retry it.
+        let queued_ack = self
+            .state
+            .lock()
+            .unwrap()
+            .claims
+            .iter()
+            .find(|claim| claim.message_id == job.message.id && claim.queued_reaction)
+            .and_then(|claim| claim.processing_reaction_id.clone());
+        if let Some(reaction_id) = queued_ack.filter(|_| !self.shutdown.load(Ordering::SeqCst)) {
+            if self
+                .transport
+                .clear_acknowledgment(&job.message.id, &reaction_id)
+                .is_ok()
+            {
+                let mut st = self.state.lock().unwrap();
+                if let Some(claim) = st
+                    .claims
+                    .iter_mut()
+                    .find(|claim| claim.message_id == job.message.id)
+                {
+                    claim.processing_reaction_id = None;
+                    claim.queued_reaction = false;
+                }
+                let _ = self.persist_state(&st);
             }
         }
         let mut message = job.message.clone();
@@ -766,7 +857,7 @@ impl Runtime {
         ));
 
         // The agent owns text delivery. Software reactions use work state only.
-        let reply_result = if auto_reply {
+        let reply_result = if auto_reply && outcome.termination != "interrupted" {
             Some(
                 self.transport
                     .reply(&job.message.id, &outcome.reply_text, key.topic_id.is_some()),
@@ -821,6 +912,13 @@ impl Runtime {
             if session.dir.is_some() && outcome.exit_code == Some(0) {
                 st.record_chat_session(&key, &job.route.prefix, now_ms());
             }
+            if job.route.follow_up == FollowUp::Steer
+                && (outcome.exit_code == Some(0) || outcome.termination == "interrupted")
+            {
+                if let Some(id) = steering.session_id() {
+                    st.record_codex_session(&key, &job.route.prefix, id);
+                }
+            }
             st.settle_claim(
                 &job.message.id,
                 now_ms(),
@@ -833,8 +931,13 @@ impl Runtime {
                     .iter_mut()
                     .find(|c| c.message_id == job.message.id)
                 {
-                    c.terminal_reaction_pending =
-                        Some(outcome.termination == "exit" && outcome.exit_code == Some(0));
+                    if outcome.termination == "interrupted" {
+                        c.acknowledgment_clear_pending = c.processing_reaction_id.is_some();
+                        c.terminal_reaction_pending = None;
+                    } else {
+                        c.terminal_reaction_pending =
+                            Some(outcome.termination == "exit" && outcome.exit_code == Some(0));
+                    }
                 }
             }
             match self.persist_state(&st) {
@@ -852,6 +955,15 @@ impl Runtime {
             self.logger
                 .log(&format!("settled {} ({})", job.message.id, outcome_code));
             self.flush_terminal_reactions();
+        }
+        if job.route.follow_up == FollowUp::Steer {
+            let mut active = self.steering.lock().unwrap();
+            if active
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &steering))
+            {
+                active.remove(&key);
+            }
         }
         let _ = timeout_secs;
     }
@@ -1209,6 +1321,234 @@ mod tests {
     }
 
     #[test]
+    fn first_job_is_on_it_and_later_same_chat_job_is_queued_then_cleared() {
+        let boundary = now_ms() - 60_000;
+        let first = mkmsg(
+            "om_first_ack",
+            boundary + 1_000,
+            "ou_self",
+            Some("/ping first"),
+            true,
+            false,
+        );
+        let second = mkmsg(
+            "om_second_ack",
+            boundary + 2_000,
+            "ou_self",
+            Some("/ping second"),
+            true,
+            false,
+        );
+        let (rt, mock, home) = init_rt("queue_ack", fixture_with(vec![first, second]), boundary);
+        let mut jobs = rt.scan_once().unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert!(mock
+            .queued_reactions
+            .lock()
+            .unwrap()
+            .contains(&"om_second_ack".into()));
+        let claims = load_or_init(&home).unwrap();
+        let claims = match claims {
+            StateLoad::Loaded(state) => state.claims,
+            _ => panic!(),
+        };
+        assert!(!claims[0].queued_reaction);
+        assert!(claims[1].queued_reaction);
+        rt.process_job(jobs.remove(0));
+        rt.process_job(jobs.remove(0));
+        assert_eq!(
+            mock.cleared_acknowledgments.lock().unwrap().as_slice(),
+            &[("om_second_ack".into(), "reaction-om_second_ack".into())]
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn interrupted_ack_clear_is_durable_and_retried_by_flush() {
+        let boundary = now_ms() - 60_000;
+        let (rt, mock, home) = init_rt("interrupt_ack", fixture_with(vec![]), boundary);
+        {
+            let mut state = rt.state.lock().unwrap();
+            state.add_claim("om_interrupted_ack", boundary + 1);
+            let claim = state.claims.last_mut().unwrap();
+            claim.status = ClaimStatus::Settled;
+            claim.processing_reaction_id = Some("reaction-om_interrupted_ack".into());
+            claim.acknowledgment_clear_pending = true;
+            save(&home, &state).unwrap();
+        }
+        rt.flush_terminal_reactions();
+        assert_eq!(
+            mock.cleared_acknowledgments.lock().unwrap().as_slice(),
+            &[(
+                "om_interrupted_ack".into(),
+                "reaction-om_interrupted_ack".into()
+            )]
+        );
+        let state = match load_or_init(&home).unwrap() {
+            StateLoad::Loaded(state) => state,
+            _ => panic!(),
+        };
+        assert!(state.claims[0].processing_reaction_id.is_none());
+        assert!(!state.claims[0].acknowledgment_clear_pending);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn steering_requires_verified_session_and_accepts_one_request() {
+        let steering = crate::worker::Steering::default();
+        assert!(!steering.request());
+        steering.observe_session_id("not-a-session".into());
+        assert!(!steering.request());
+        steering.observe_session_id("123e4567-e89b-12d3-a456-426614174000".into());
+        assert_eq!(
+            steering.session_id().as_deref(),
+            Some("123e4567-e89b-12d3-a456-426614174000")
+        );
+        assert!(steering.request());
+        assert!(!steering.request());
+    }
+
+    #[test]
+    fn scan_requests_steering_only_for_immediate_bound_owner_follow_up() {
+        let make_config = || {
+            let mut config = Config::default();
+            config
+                .routes
+                .iter_mut()
+                .find(|r| r.prefix == "/codex")
+                .unwrap()
+                .follow_up = FollowUp::Steer;
+            config
+        };
+        let make_active = |rt: &Runtime, count: usize| {
+            let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let worker_running = running.clone();
+            rt.mailboxes.set_runner(Arc::new(move |_| {
+                while worker_running.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+            }));
+            let route = rt
+                .config
+                .lock()
+                .unwrap()
+                .routes
+                .iter()
+                .find(|r| r.prefix == "/codex")
+                .unwrap()
+                .clone();
+            let key = test_key("oc_test", None);
+            let jobs = (0..count)
+                .map(|i| Job {
+                    key: key.clone(),
+                    message: mkmsg(
+                        &format!("om_active_{i}"),
+                        0,
+                        "ou_self",
+                        Some("/codex"),
+                        true,
+                        false,
+                    ),
+                    route: route.clone(),
+                })
+                .collect();
+            rt.mailboxes.deliver(jobs);
+            let steering = Arc::new(crate::worker::Steering::default());
+            steering.observe_session_id("123e4567-e89b-12d3-a456-426614174000".into());
+            rt.steering.lock().unwrap().insert(key, steering.clone());
+            (steering, running)
+        };
+        let boundary = now_ms() - 60_000;
+
+        let owner = mkmsg(
+            "om_owner_follow_up",
+            boundary + 1_000,
+            "ou_self",
+            Some("/codex"),
+            true,
+            false,
+        );
+        let (rt, _, home) = init_rt_with_config(
+            "steer_owner",
+            fixture_with(vec![owner]),
+            boundary,
+            make_config(),
+        );
+        let (steering, running) = make_active(&rt, 1);
+        assert_eq!(rt.scan_once().unwrap().len(), 1);
+        assert!(
+            !steering.request(),
+            "the immediate bound owner follow-up must request steering"
+        );
+        running.store(false, Ordering::SeqCst);
+        rt.shutdown.store(true, Ordering::SeqCst);
+        rt.mailboxes.drain_and_join();
+        let _ = std::fs::remove_dir_all(home);
+
+        let mut guest = mkmsg(
+            "om_guest_follow_up",
+            boundary + 1_000,
+            "ou_guest",
+            Some("@_user_1 /codex"),
+            true,
+            false,
+        );
+        guest.chat_type = "group".into();
+        guest.sender_is_user = true;
+        guest.leading_mention = Some("ou_self".into());
+        guest.mention_command = Some("/codex".into());
+        // Mention admission is enabled only for this route in the guest case.
+        let mut guest_config = make_config();
+        guest_config
+            .routes
+            .iter_mut()
+            .find(|r| r.prefix == "/codex")
+            .unwrap()
+            .allow_mentions = true;
+        let (rt, _, home) = init_rt_with_config(
+            "steer_guest",
+            fixture_with(vec![guest]),
+            boundary,
+            guest_config,
+        );
+        let (steering, running) = make_active(&rt, 1);
+        assert_eq!(rt.scan_once().unwrap().len(), 1);
+        assert!(
+            steering.request(),
+            "a guest mention must not request owner steering"
+        );
+        running.store(false, Ordering::SeqCst);
+        rt.shutdown.store(true, Ordering::SeqCst);
+        rt.mailboxes.drain_and_join();
+        let _ = std::fs::remove_dir_all(home);
+
+        let owner = mkmsg(
+            "om_owner_behind",
+            boundary + 1_000,
+            "ou_self",
+            Some("/codex"),
+            true,
+            false,
+        );
+        let (rt, _, home) = init_rt_with_config(
+            "steer_ahead",
+            fixture_with(vec![owner]),
+            boundary,
+            make_config(),
+        );
+        let (steering, running) = make_active(&rt, 2);
+        assert_eq!(rt.scan_once().unwrap().len(), 1);
+        assert!(
+            steering.request(),
+            "a follow-up behind another queued claim must remain FIFO"
+        );
+        running.store(false, Ordering::SeqCst);
+        rt.shutdown.store(true, Ordering::SeqCst);
+        rt.mailboxes.drain_and_join();
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn duplicate_delivery_claims_once() {
         let now = now_ms();
         let boundary = now - 60_000;
@@ -1422,6 +1762,7 @@ mod tests {
                 dir: None,
                 timeout: Some(10),
                 allow_mentions: false,
+                follow_up: crate::config::FollowUp::Queue,
                 session: Some("chat".into()),
             }],
             ..Config::default()
@@ -1503,6 +1844,7 @@ mod tests {
                 dir: None,
                 timeout: Some(10),
                 allow_mentions: false,
+                follow_up: crate::config::FollowUp::Queue,
                 session: Some("chat".into()),
             }],
             ..Config::default()
@@ -2666,6 +3008,7 @@ mod tests {
             dir: None,
             timeout: None,
             allow_mentions: false,
+            follow_up: crate::config::FollowUp::Queue,
             session: None,
         });
         std::thread::sleep(std::time::Duration::from_millis(10));
