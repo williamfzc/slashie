@@ -38,4 +38,36 @@ The current business acceptance entry is `scripts/test_feishu_coverage.py`. It u
 
 On 2026-11-21, the natural-office run produced correct actual work: quotation totals and budget balance, updated meeting assignments, independently maintained topic decisions, and a confirmed target-owned reply under the existing Work authorization. The server-side search audit retained a single bound sender on every search page and never requested the other speaker's message details. Capacity checks used the production limits without weakening them: 18 real topics exceeded the 10-pending-job bound, and nine requests in one topic exceeded its four-job bound; overflow eventually executed once and left its work files. All 36 final business checks passed after completed retests; interrupted attempts remain in private evidence, not committed.
 
-Older synthetic and code/character input runs are not the current office-business acceptance and are not shipped as additional acceptance entry points. Native menu interaction is not verified: application discovery was unavailable in an earlier run and a later desktop attempt stopped at the locked screen. CLI start/stop/restart checks and release builds are separate and cannot replace native interaction. Controlled credential expiry and Linux deployment are outside this Mac run. See [product acceptance](product.md#release-acceptance) for the broader release matrix.
+Older synthetic and code/character input runs are not the current office-business acceptance and are not shipped as additional acceptance entry points. Native menu interaction is not verified: application discovery was unavailable in an earlier run and a later desktop attempt stopped at the locked screen. CLI start/stop/restart checks and release builds are separate and cannot replace native interaction. See [product acceptance](product.md#release-acceptance) for the broader release matrix.
+
+## Default delivery requirements
+
+Customize delivery in the existing route program, not a separate `default_prompts` configuration field; that retired field is ignored. Prepend an instruction to `SLASHIE_PROMPT` before invoking the session adapter, keeping the argument and original source intact. This does not change `reply_mode: agent`, grant send permission, or move status ownership to the target.
+
+A tested requirement is:
+
+> After completing the requested work, use your already-authorized Feishu tools to reply to the source message, inside its topic when applicable. Send a short conclusion and necessary deliverables, then read back the actual reply. Output only inside Doubao is not a group reply. If tools or send permission are unavailable, do not change identity or work around the restriction; report that delivery did not occur. An explicit request not to reply overrides this default. Slashie owns acceptance and completion reactions; do not operate them.
+
+For example, inside the route `cmd`:
+
+```sh
+SLASHIE_PROMPT="Complete the office task. Use your existing authorized Feishu tools to reply briefly to the original source and read it back. Do not claim a group reply from Doubao-only output. If delivery is unauthorized, do not send. An explicit no-reply request overrides this default. Slashie owns all status reactions.
+
+$SLASHIE_PROMPT" python3 "/absolute/path/to/slashie/scripts/doubao_session.py"
+```
+
+Use a timeout appropriate for actual work rather than treating the short demonstration timeout as a production recommendation. A prompt is an instruction, not a delivery guarantee: verify the work file, saved continuation, actual `reply_to`, and source reaction separately.
+
+## Current three-entry acceptance
+
+The 2026-11-23 validation used real Feishu office messages and uploaded example materials, not simulated ingress. Versions: Slashie v0.2.0, Lark CLI 1.0.100, Doubao CLI 2.37.2. Private messages, source IDs, work products, local paths and provider sessions remain outside the repository.
+
+| Entry | Actual result | Remaining boundary |
+| --- | --- | --- |
+| macOS CLI | Ordinary group, self-DM, topics, exact continuation and isolation, office files, uploaded quotation calculation, target-owned original-message replies and lifecycle checks passed. The configured default-delivery route passed three turns: first work, continued owner change, and explicit no-reply override. | Self-DM does not establish every external direct-message relationship. |
+| Linux CLI | A user systemd service completed real group/self-DM/topic script work, three topic AI turns, an uploaded-file calculation, original-message reply, three default-delivery turns, software status and start/stop checks. | The compatible 2.37.2 provider was run from its official standalone package with local authorization; the old system installation was not upgraded. |
+| macOS App | Rebuilt bundle metadata is 0.2.0 and strict ad-hoc resource-signature verification passed. | Locked desktop prevented menu, Settings, button-driven start/stop and App-originated live work. DMG rebuilding failed with a resource-busy error. No claim of native acceptance or notarization. |
+
+Capacity was separately verified on both CLI hosts: 18 real topic requests exceeded the ten-job bound, and nine real requests in one topic exceeded its four-job bound. All 27 eventually ran once per host and produced work files; all 27 source messages per host were read back with `DONE` and no `OnIt`. On macOS, shutdown interrupted one final reaction cleanup: a paused restart retried only status, removed its confirmed acknowledgment, and left the execution count unchanged. A real second speaker's office request was excluded from every server-filtered discovery page and never requested by the software's detail reads; the bound user's request still completed.
+
+Failures remain evidence, not passes: Doubao 2.31.2 rejected the adapter output arguments; one 2.37.2 ordinary-group file task timed out, and its follow-up ended during shutdown. An initial default-delivery instruction produced a file and `DONE` but no group reply; the explicit requirement above then passed. Linux capacity startup initially mistook a refreshable saved user login for a missing login, so 18 already-sent requests were not accepted. Normal CLI refresh restored access and a new batch passed; the adapter now permits `needs_refresh` only through a successful authenticated identity lookup. Controlled expiry, forced-crash timing and the full native matrix are not established by these results.

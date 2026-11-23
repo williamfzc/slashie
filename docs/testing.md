@@ -67,7 +67,7 @@ Two layers, by [design](DESIGN.md):
 | Shutdown drains queued work, settles it as shutdown, kills the running group | `mailbox::shutdown_pill_finishes_queued_jobs`, `runtime::queued_agent_work_settles_as_shutdown_without_starting`, `worker::shutdown_terminates_active_group`, `worker::timeout_kills_group`, `process::shutdown_terminates_a_sleeping_tree` |
 | Configuration validation and hot reload | `config::rejects_*` family, `runtime::invalid_config_blocks_intake`, `runtime::config_edits_apply_at_the_next_scan_without_restart` |
 | Offline route and log CLI; usage errors; unparsable config blocks edits | `cli::add_list_remove_round_trip`, `cli::defers_field_rules_to_the_shared_validator`, `cli::refuses_to_edit_an_unparsable_config`, `cli::rejects_duplicates_and_bad_prefixes`, `cli::usage_errors_name_the_usage_block`, `cli::log_prints_tail_filters_by_id_and_spans_rotation` |
-| Identity binding gates intake and search | `runtime::identity_change_blocks_intake`, `lark::identity_missing_is_fatal`, `lark::search_requires_bound_identity`, `lark::permission_evidence_is_not_inferred_from_login` |
+| Identity binding gates intake and search | `runtime::identity_change_blocks_intake`, `lark::identity_missing_is_fatal`, `lark::identity_refresh_requires_a_successful_authenticated_lookup`, `lark::search_requires_bound_identity`, `lark::permission_evidence_is_not_inferred_from_login` |
 | Instance lock conflicts | `lock::second_lock_conflicts` |
 | Log restraint and rotation | `logging::log_appends_and_rotates`, `runtime::quiet_scans_stay_out_of_the_log` |
 

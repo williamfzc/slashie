@@ -239,6 +239,9 @@ pub fn skill(home: &Path) -> String {
          \n\
          - Route and interval edits apply at the next scan without restarting\n\
          Slashie; the Lark CLI binding applies only at startup.\n\
+         - The poll interval is `poll_interval` in `config.json`: a whole number\n\
+         of seconds from 1 to 60, default 5. It has no subcommand; edit that key\n\
+         directly (or use Settings) and keep the rest of the file intact.\n\
          - Use the route subcommands instead of editing config.json by hand so the\n\
          shared validation runs; an unparsable config blocks intake until repaired.\n\
          - Ask the user what they want to automate before changing routes, and show\n\
@@ -461,6 +464,7 @@ mod tests {
             "SLASHIE_PROMPT",
             "--session chat",
             "next scan",
+            "seconds from 1 to 60",
             "fresh Feishu message",
         ] {
             assert!(doc.contains(needle), "missing {needle} in skill doc");

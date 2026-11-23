@@ -121,10 +121,13 @@ def main():
         nonlocal process,log
         subprocess.run([str(binary),'--poll','on' if on else 'off'],env=env,capture_output=True,check=True)
         n=len(list(out.glob('process-*.log')));lp=out/('process-'+str(n)+'.log');log=lp.open('w')
+        process_started_ms=int(time.time()*1000)
         process=subprocess.Popen([str(binary)],env=env,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
         end=time.monotonic()+45
         while time.monotonic()<end:
-            if ('scan ok:' if on else 'slashie starting') in lp.read_text():return
+            # Empty successful scans are intentionally quiet; readiness is the
+            # persisted completed scan, not a log line for an eligible request.
+            if (state().get('last_scan_end_ms', 0) > process_started_ms if on else 'slashie starting' in lp.read_text()):return
             if process.poll() is not None:raise RuntimeError(lp.read_text())
             time.sleep(.5)
         raise RuntimeError('Startup not ready')
@@ -247,7 +250,7 @@ sys.stdout.buffer.write(r.stdout);sys.stderr.buffer.write(r.stderr);raise System
             other=None;end=time.monotonic()+150
             while not other and time.monotonic()<end:
                 d=cli(['im','+chat-messages-list','--chat-id',args.speaker_chat,'--order','desc','--page-size','20','--no-reactions','--format','json'])
-                other=next((m for m in d['data']['messages'] if m.get('sender',{}).get('id')==args.speaker_id and m.get('content','').strip()==request),None)
+                other=next((m for m in d['data']['messages'] if m.get('sender',{}).get('id')==args.speaker_id and m.get('content','').strip().removesuffix(' （由豆包工作发送）')==request),None)
                 if not other:time.sleep(5)
             if not other:raise RuntimeError('Other speaker did not send actual office request')
             own=send(args.speaker_chat,'/record 请记录会议准备待办：小李确认会议室，小王检查投影设备，小陈核对参会名单。')
@@ -351,7 +354,7 @@ sys.stdout.buffer.write(r.stdout);sys.stderr.buffer.write(r.stderr);raise System
         subprocess.run([str(binary),'--poll','off'],env=env,capture_output=True,check=True)
         st=state();results.append({'stage':args.stage,'name':'测试关闭且无待处理任务','passed':not st['polling'] and not any(c['status']=='pending' for c in st['claims'])});save()
         latest={r['name']:r for r in results if r['name']!='阶段中断'}
-        summary={'completed':run['completed'],'messages':len(sent),'results':results,'final_results':list(latest.values()),'all_passed':all(r['passed'] for r in latest.values())}
+        summary={'completed':run['completed'],'messages':len(sent),'results':results,'final_results':list(latest.values()),'all_passed':args.stage in run['completed'] and all(r['passed'] for r in latest.values())}
         (out/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2))
         print(json.dumps({'stage':args.stage,'completed':run['completed'],'messages':len(sent),'passed':sum(r['passed'] for r in results)},ensure_ascii=False),flush=True)
     return 0

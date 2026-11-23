@@ -250,10 +250,13 @@ impl LarkCliTransport {
             .run_json(&["auth", "status", "--json"], None, self.timeout_ms)
             .map_err(cli_failure_to_transport)?;
         *self.reply_permission.lock().unwrap() = reply_scope(&status);
+        // The CLI refreshes an existing user session on the next user API call.
+        // Do not mistake this recoverable state for a missing login; the
+        // authenticated +get-user below must still succeed before binding.
         let user_ready = status
             .pointer("/identities/user/status")
             .and_then(|v| v.as_str())
-            .map(|s| s == "ready")
+            .map(|s| s == "ready" || s == "needs_refresh")
             .unwrap_or(false);
         if !user_ready {
             return Err(TransportError::Fatal(
@@ -836,11 +839,16 @@ def stdin_arg(flag):
 if args[:2] == ["auth", "status"]:
     if profile == "noauth":
         print(json.dumps({"identities": {"user": {"status": "missing"}}}))
+    elif profile in ["refresh", "refresh-failed"]:
+        print(json.dumps({"identities": {"user": {"status": "needs_refresh"}}}))
     else:
         print(json.dumps({"identities": {"user": {"status": "ready"}}}))
     sys.exit(0)
 
 if args[:2] == ["contact", "+get-user"]:
+    if profile == "refresh-failed":
+        print(json.dumps({"ok": False, "error": {"message": "saved login could not be refreshed"}}))
+        sys.exit(3)
     # Live-verified 1.0.68 shape: nested under data.user (regression fixture
     # for the envelope mismatch found in live validation).
     print(json.dumps({"ok": True, "data": {"user": {"open_id": "ou_verified"}}}))
@@ -1042,6 +1050,21 @@ sys.exit(0)
         let t = transport_in(&dir, "test");
         assert_eq!(t.verify_identity().unwrap(), "ou_verified");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn identity_refresh_requires_a_successful_authenticated_lookup() {
+        for (profile, succeeds) in [("refresh", true), ("refresh-failed", false)] {
+            let dir = tmp(profile);
+            let t = transport_in(&dir, profile);
+            let result = t.verify_identity();
+            if succeeds {
+                assert_eq!(result.unwrap(), "ou_verified");
+            } else {
+                assert!(result.is_err(), "failed refresh must not bind an identity");
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     #[test]

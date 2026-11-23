@@ -15,7 +15,7 @@
 <a class="skip" href="#commands">Handoffs</a>
 <main>
 <header><span class="slash" aria-hidden="true">/</span><h1 translate="no">Slashie</h1><span id="preview" class="preview" hidden>Preview</span><div class="listening"><span id="listening-label">Stopped</span><button id="listen" class="switch" role="switch" aria-label="Listen for commands" aria-checked="false" disabled></button></div></header>
-<div class="control-row"><label for="interval">Check every</label><select id="interval" name="poll_interval" disabled><option value="10">10s</option><option value="20">20s</option><option value="30">30s</option><option value="60">60s</option></select><span id="next-scan" class="next"></span></div>
+<div class="control-row"><label for="interval">Check every</label><input id="interval" name="poll_interval" type="number" min="1" max="60" step="1" value="5" style="width:6ch" disabled><span>s</span><span id="next-scan" class="next"></span></div>
 <section class="health" aria-label="Channel availability"><div class="health-head"><span class="health-title">Feishu</span><span id="availability" class="health-state" role="status">Not checked</span><button id="check" class="text-button" type="button" disabled aria-label="Refresh connection status">↻</button></div><div class="steps" hidden><span id="receive">Receive —</span><span id="reply">Reply —</span><span id="work">Work —</span></div><p id="health-note" class="health-note" hidden></p></section>
 <p id="error" role="alert"></p>
 <details id="configuration" class="advanced"><summary>Configuration</summary><section id="commands" aria-labelledby="commands-title"><div class="section-head"><h2 id="commands-title">Handoffs</h2><span id="route-count" class="count"></span></div><ul id="routes" class="routes"></ul></section></details>
@@ -26,7 +26,7 @@
 const nativeInvoke=window.__TAURI__?.core?.invoke?.bind(window.__TAURI__.core)??window.__TAURI_INTERNALS__?.invoke?.bind(window.__TAURI_INTERNALS__);
 const preview=new URLSearchParams(location.search).get('preview');const el=id=>document.getElementById(id);
 let savedText='',config=null,runtime=null,online=false,refreshing=false,lastCheck=0,feedbackTimer;const pending=new Set();
-const example={poll_interval:20,routes:[{prefix:'/doubao',cmd:'python3 scripts/doubao_session.py',session:'chat',timeout:90},{prefix:'/review',cmd:'./review.sh "$SLASHIE_PROMPT"',timeout:30}]};
+const example={poll_interval:5,routes:[{prefix:'/doubao',cmd:'python3 scripts/doubao_session.py',session:'chat',timeout:90},{prefix:'/review',cmd:'./review.sh "$SLASHIE_PROMPT"',timeout:30}]};
 let previewRuntime={polling:true,can_toggle:true,receive_status:'verified',reply_status:'blocked',last_scan_ms:Date.now(),next_scan_in_secs:12,pending_jobs:0,status_text:null};
 async function invoke(name,args){if(!preview)return nativeInvoke(name,args);if(name==='get_status')return previewRuntime;if(name==='get_settings')return{config_text:JSON.stringify(example,null,2),log_available:true};if(name==='set_polling'){previewRuntime.polling=args.on;return args.on;}if(name==='save_settings'){const next=JSON.parse(args.text);Object.keys(example).forEach(k=>delete example[k]);Object.assign(example,next);return;}if(name==='check_connection')return;}
 const available=!!preview||typeof nativeInvoke==='function';

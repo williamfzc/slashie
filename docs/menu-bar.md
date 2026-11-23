@@ -53,7 +53,7 @@ The window answers two primary questions: is listening enabled, and which part o
 
 | Area | Content |
 | --- | --- |
-| Listening | A saved Listening/Stopped switch in the window, synchronized with the menu. The adjacent 10/20/30/60-second interval and next-query countdown show polling cost. Off means no new queries. |
+| Listening | A saved Listening/Stopped switch in the window, synchronized with the menu. The adjacent interval field (1–60 seconds) and next-query countdown show polling cost. Off means no new queries. |
 | Channel availability | One compact status and a refresh icon. Default agent-owned delivery does not treat missing send scope as unavailable; explicit auto mode shows missing reply scope. Receiving/reply evidence and failure details remain local runtime data and can be inspected in the log, not persistent explanatory rows. Recent scan evidence expires after two minutes; prior success is not current all-chat or target readiness. |
 | Handoffs | Hidden under Configuration by default. Expand to see exact prefix → configured target and edit a program. |
 | Per-handoff configuration | Expand Configure to edit Script. Save validates the full file and rejects stale edits; Cancel discards only the draft. No automatic test execution of a user's script. |

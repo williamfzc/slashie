@@ -1779,7 +1779,7 @@ mod tests {
     #[test]
     fn invalid_config_blocks_intake() {
         let home = test_home("badconfig");
-        std::fs::write(home.join("config.json"), "{\"poll_interval\": 15}").unwrap();
+        std::fs::write(home.join("config.json"), "{\"poll_interval\": 0}").unwrap();
         let (_, fault) = Config::load_or_create(&home).unwrap();
         assert!(fault.is_some(), "invalid config yields a fault");
         let mock = Arc::new(MockTransport::new(MockFixture {

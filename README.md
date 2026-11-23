@@ -75,7 +75,7 @@ A shared Rust runtime drives everything: durable per-message claims in `state.js
 
 ## Status
 
-macOS menu-bar app and headless binary are working today; the live chat-session flow is verified with Pi and Claude Code. Linux headless (systemd) is planned next — see [delivery status](docs/product.md#delivery-and-evidence).
+macOS and Linux headless routes have been exercised with real Feishu messages and Doubao CLI: office work files, exact continuations, attachment calculation, target-owned replies, software reactions, and start/stop behavior. The macOS bundle builds, but native menu acceptance remains pending on the test host. See [Doubao acceptance](docs/doubao.md#current-three-entry-acceptance) for tested versions and limitations; build success is not end-to-end proof.
 
 Start with the [documentation index](docs/index.md).
 

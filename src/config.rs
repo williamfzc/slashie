@@ -6,8 +6,14 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-pub const DEFAULT_POLL_INTERVAL: u64 = 10;
-pub const ALLOWED_POLL_INTERVALS: [u64; 4] = [10, 20, 30, 60];
+pub const DEFAULT_POLL_INTERVAL: u64 = 5;
+/// Inclusive bounds on the scan interval; the rate between them is an
+/// operator choice.
+pub const MIN_POLL_INTERVAL: u64 = 1;
+pub const MAX_POLL_INTERVAL: u64 = 60;
+/// Default delivery rule added to every prompt. The agent still decides;
+/// Slashie never forces a reply.
+pub const DEFAULT_DELIVERY_HINT: &str = "先读上下文，再决定是否回复原消息。";
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// System dirs plus the common Homebrew prefixes, so the stock agent
 /// routes (`claude`, `codex`, `pi`) resolve on a normal machine without
@@ -149,10 +155,16 @@ pub(crate) fn route_prefix_problem(prefix: &str) -> Option<&'static str> {
 }
 
 pub fn validate(cfg: &Config) -> Result<(), ConfigError> {
-    if !ALLOWED_POLL_INTERVALS.contains(&cfg.poll_interval) {
+    if cfg.poll_interval < MIN_POLL_INTERVAL {
         return err(format!(
-            "poll_interval must be one of 10, 20, 30, 60; got {}",
-            cfg.poll_interval
+            "poll_interval must be at least {} seconds; got {}",
+            MIN_POLL_INTERVAL, cfg.poll_interval
+        ));
+    }
+    if cfg.poll_interval > MAX_POLL_INTERVAL {
+        return err(format!(
+            "poll_interval must be at most {} seconds; got {}",
+            MAX_POLL_INTERVAL, cfg.poll_interval
         ));
     }
     let mut seen: Vec<&str> = Vec::new();
@@ -300,6 +312,7 @@ mod tests {
             .collect();
         assert_eq!(prefixes, ["/ping", "/pi", "/claude", "/codex"]);
         assert_eq!(cfg.routes[0].cmd, "echo pong");
+        assert_eq!(DEFAULT_POLL_INTERVAL, 5);
         assert_eq!(cfg.poll_interval, DEFAULT_POLL_INTERVAL);
     }
 
@@ -336,12 +349,53 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bad_poll_interval() {
+    fn accepts_operator_poll_interval() {
         let cfg = Config {
-            poll_interval: 15,
+            poll_interval: 5,
+            ..Config::default()
+        };
+        assert!(validate(&cfg).is_ok());
+    }
+
+    #[test]
+    fn accepts_one_second_poll_interval() {
+        let cfg = Config {
+            poll_interval: 1,
+            ..Config::default()
+        };
+        assert!(validate(&cfg).is_ok());
+    }
+
+    #[test]
+    fn accepts_sixty_second_poll_interval() {
+        let cfg = Config {
+            poll_interval: MAX_POLL_INTERVAL,
+            ..Config::default()
+        };
+        assert!(validate(&cfg).is_ok());
+    }
+
+    #[test]
+    fn rejects_zero_poll_interval() {
+        let cfg = Config {
+            poll_interval: 0,
             ..Config::default()
         };
         assert!(validate(&cfg).is_err());
+    }
+
+    #[test]
+    fn rejects_poll_interval_above_the_maximum() {
+        let cfg = Config {
+            poll_interval: MAX_POLL_INTERVAL + 1,
+            ..Config::default()
+        };
+        assert_eq!(
+            validate(&cfg),
+            Err(ConfigError(
+                "poll_interval must be at most 60 seconds; got 61".into()
+            ))
+        );
     }
 
     #[test]
