@@ -66,6 +66,7 @@ fn print_help() {
              route list        Print the route table as JSON.\n\
              route add <PREFIX> --cmd <COMMAND> [--dir <PATH>]\n\
                                [--timeout <SECS>] [--session chat]\n\
+                               [--allow-mentions]\n\
                                Add a route.\n\
              route remove <PREFIX>\n\
                                Remove a route.\n\
@@ -279,7 +280,9 @@ fn main() {
                     ),
                     status::OperatorFault::CheckSettingsAndRestart,
                 )
-            } else if let Some(cli) = config.lark_cli.clone() {
+            } else if let Some(crate::config::ChannelConfig::Feishu { lark_cli: cli }) =
+                config.channel.clone()
+            {
                 let lark = Arc::new(lark::LarkCliTransport::new(
                     &cli,
                     &config.process_path,
@@ -302,8 +305,9 @@ fn main() {
             } else {
                 die_or_wait(
                     format!(
-                        "config.json at {} has no lark_cli section; set lark_cli.path \
-                         and lark_cli.profile to your Lark CLI executable and profile",
+                        "config.json at {} has no Feishu channel; set channel.type to \
+                         feishu and channel.lark_cli.path/profile to your Lark CLI \
+                         executable and profile",
                         config_path
                     ),
                     status::OperatorFault::CheckSettingsAndRestart,

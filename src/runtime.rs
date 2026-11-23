@@ -17,6 +17,31 @@ use std::sync::{Arc, Mutex};
 pub const LOOKBACK_MS: i64 = 5 * 60 * 1000;
 pub const MAX_WAITING_JOBS: usize = 10;
 
+/// Resolve the exact route command represented by a message without changing
+/// the original wire text. Human mentions are admitted only in group chats;
+/// the adapter supplies `mention_command` after validating the leading bound
+/// mention placeholder.
+fn route_for_message<'a>(
+    message: &crate::transport::Message,
+    identity: &str,
+    routes: &'a [Route],
+) -> Option<&'a Route> {
+    let (command, mentioned) = if message.sender == identity {
+        (message.text.as_deref(), false)
+    } else if message.sender_is_user
+        && message.chat_type == "group"
+        && message.leading_mention.as_deref() == Some(identity)
+    {
+        (message.mention_command.as_deref(), true)
+    } else {
+        return None;
+    };
+    let first = command?.split_whitespace().next()?;
+    routes
+        .iter()
+        .find(|route| route.prefix == first && (!mentioned || route.allow_mentions))
+}
+
 #[derive(Debug)]
 pub struct Job {
     /// Conversation identity, computed once at admission and carried
@@ -300,7 +325,7 @@ impl Runtime {
     /// "Configuration and files"): routes and the poll interval apply from
     /// the next scan, no restart. A file that fails to read or validate
     /// keeps the previous configuration and logs once per changed version.
-    /// The channel binding (`lark_cli`) is startup-only, so swapping it here
+    /// The channel binding is startup-only, so swapping it here
     /// has no effect until a restart.
     fn maybe_reload_config(&self) {
         let mtime = config_mtime(&self.home);
@@ -454,7 +479,14 @@ impl Runtime {
             return Ok(Vec::new());
         }
 
-        let ids = match self.transport.search(start, end) {
+        // One route snapshot drives both search breadth and admission. A
+        // config swap during the scan applies only to the next scan.
+        let routes = self.config.lock().unwrap().routes.clone();
+        let search_mentions = routes.iter().any(|route| route.allow_mentions);
+        let ids = match self
+            .transport
+            .search_with_mentions(start, end, search_mentions)
+        {
             Ok(ids) => ids,
             Err(TransportError::Transient(m)) => {
                 // Slice note: full exponential backoff comes with the real adapter.
@@ -504,31 +536,25 @@ impl Runtime {
             }
         };
 
-        // One consistent snapshot per scan; a mid-scan config swap only
-        // affects the next scan.
-        let routes = self.config.lock().unwrap().routes.clone();
         // The search API can round the requested window to whole seconds.
         let mut eligible: Vec<_> = details
             .into_iter()
             .filter(|m| {
-                m.sender == self.identity
-                    && !m.recalled
+                !m.recalled
                     // A topic root or a reply in a topic is allowed; an
                     // ordinary reply thread is still excluded.
                     && (m.top_level || m.topic_id.is_some())
-                    && m.text.is_some()
                     && m.created_at_ms > boundary
                     && m.created_at_ms >= start
                     && m.created_at_ms <= end
             })
-            .filter(|m| {
-                let text = m.text.as_ref().unwrap();
-                let first = text.split_whitespace().next().unwrap_or("");
-                routes.iter().any(|r| r.prefix == first)
+            .filter_map(|message| {
+                let route = route_for_message(&message, &self.identity, &routes)?;
+                Some((message, route))
             })
             .collect();
         // Creation order, message ID as tiebreaker.
-        eligible.sort_by(|a, b| (a.created_at_ms, &a.id).cmp(&(b.created_at_ms, &b.id)));
+        eligible.sort_by(|(a, _), (b, _)| (a.created_at_ms, &a.id).cmp(&(b.created_at_ms, &b.id)));
 
         let eligible_count = eligible.len();
         let mut jobs = Vec::new();
@@ -541,15 +567,7 @@ impl Runtime {
             usize,
         > = std::collections::HashMap::new();
         let mut promised_new = 0usize;
-        for m in eligible {
-            let route = {
-                let first = m.text.as_ref().unwrap().split_whitespace().next().unwrap();
-                routes.iter().find(|r| r.prefix == first).cloned()
-            };
-            let route = match route {
-                Some(r) => r,
-                None => continue,
-            };
+        for (m, route) in eligible {
             // Conversation identity is fixed at admission and carried with
             // the job; the mailbox it names must have room before claiming.
             let key = self.transport.conversation_key(&m);
@@ -631,7 +649,7 @@ impl Runtime {
             jobs.push(Job {
                 key,
                 message: m,
-                route,
+                route: route.clone(),
             });
         }
 
@@ -939,6 +957,9 @@ mod tests {
             chat_id: "oc_test".into(),
             topic_id: None,
             text: text.map(|s| s.into()),
+            sender_is_user: sender.starts_with("ou_"),
+            leading_mention: None,
+            mention_command: None,
             top_level,
             recalled,
             link: None,
@@ -1120,6 +1141,70 @@ mod tests {
             }
             _ => panic!(),
         }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn mentions_require_opt_in_bound_account_and_group_scope() {
+        let boundary = now_ms() - 60_000;
+        let mut group = mkmsg(
+            "om_group_mention",
+            boundary + 1_000,
+            "ou_friend",
+            Some("@_user_1 /ping hi"),
+            true,
+            false,
+        );
+        group.chat_type = "group".into();
+        group.sender_is_user = true;
+        group.leading_mention = Some("ou_self".into());
+        group.mention_command = Some("/ping hi".into());
+        let mut p2p = group.clone();
+        p2p.id = "om_p2p_mention".into();
+        p2p.chat_type = "p2p".into();
+        let mut wrong_target = group.clone();
+        wrong_target.id = "om_wrong_target".into();
+        wrong_target.leading_mention = Some("ou_other".into());
+        let mut topic = group.clone();
+        topic.id = "om_topic_mention".into();
+        topic.chat_id = "oc_second_group".into();
+        topic.topic_id = Some("omt_test".into());
+        topic.top_level = false;
+        let mut ordinary_reply = topic.clone();
+        ordinary_reply.id = "om_ordinary_reply".into();
+        ordinary_reply.topic_id = None;
+        let mut bot = group.clone();
+        bot.id = "om_bot".into();
+        bot.sender_is_user = false;
+        let mut bare_command = group.clone();
+        bare_command.id = "om_bare_command".into();
+        bare_command.text = Some("/ping hi".into());
+        bare_command.leading_mention = None;
+        bare_command.mention_command = None;
+
+        let (rt, _mock, home) = init_rt(
+            "mentions",
+            fixture_with(vec![
+                group,
+                p2p,
+                wrong_target,
+                topic,
+                ordinary_reply,
+                bot,
+                bare_command,
+            ]),
+            boundary,
+        );
+        assert!(rt.scan_once().unwrap().is_empty());
+        rt.config.lock().unwrap().routes[0].allow_mentions = true;
+        let jobs = rt.scan_once().unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].message.id, "om_group_mention");
+        assert_eq!(jobs[0].message.text.as_deref(), Some("@_user_1 /ping hi"));
+        assert_eq!(jobs[0].message.mention_command.as_deref(), Some("/ping hi"));
+        assert_eq!(jobs[1].message.id, "om_topic_mention");
+        assert_eq!(jobs[1].key.chat_id, "oc_second_group");
+        assert_eq!(jobs[1].key.topic_id.as_deref(), Some("omt_test"));
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1336,6 +1421,7 @@ mod tests {
                 cmd: "printf '%s|%s' \"$SLASHIE_CONTINUE\" \"$SLASHIE_CHAT\" > \"$SLASHIE_SESSION_DIR/state\"".into(),
                 dir: None,
                 timeout: Some(10),
+                allow_mentions: false,
                 session: Some("chat".into()),
             }],
             ..Config::default()
@@ -1416,6 +1502,7 @@ mod tests {
                 cmd: "printf '%s|%s|%s|%s|%s' \"$SLASHIE_CHANNEL\" \"$SLASHIE_CHAT\" \"$SLASHIE_TOPIC\" \"$SLASHIE_CONTINUE\" \"$(basename \"$PWD\")\" > \"$SLASHIE_SESSION_DIR/state\"".into(),
                 dir: None,
                 timeout: Some(10),
+                allow_mentions: false,
                 session: Some("chat".into()),
             }],
             ..Config::default()
@@ -2578,6 +2665,7 @@ mod tests {
             cmd: "echo late".into(),
             dir: None,
             timeout: None,
+            allow_mentions: false,
             session: None,
         });
         std::thread::sleep(std::time::Duration::from_millis(10));

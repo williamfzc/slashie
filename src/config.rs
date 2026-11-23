@@ -51,6 +51,9 @@ pub struct Route {
     /// Optional positive integer in seconds. Defaults to 30.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
+    /// Include messages that explicitly mention the bound Feishu user.
+    #[serde(default)]
+    pub allow_mentions: bool,
     /// Opt into one persistent agent session per Feishu chat. The only
     /// supported value is "chat"; the route then runs in a Slashie-owned
     /// workspace and receives SLASHIE_CONTINUE.
@@ -70,7 +73,7 @@ pub enum ReplyMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lark_cli: Option<LarkCli>,
+    pub channel: Option<ChannelConfig>,
     #[serde(default)]
     pub process_path: Vec<String>,
     #[serde(default)]
@@ -81,10 +84,16 @@ pub struct Config {
     pub reply_mode: ReplyMode,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChannelConfig {
+    Feishu { lark_cli: LarkCli },
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
-            lark_cli: None,
+            channel: None,
             process_path: DEFAULT_PROCESS_PATH.iter().map(|s| s.to_string()).collect(),
             poll_interval: DEFAULT_POLL_INTERVAL,
             reply_mode: ReplyMode::Agent,
@@ -117,6 +126,7 @@ if [ "$SLASHIE_CONTINUE" = 1 ]; then printf '%s' "$SLASHIE_PROMPT" | "$tool" -p 
                 cmd: cmd.into(),
                 dir: None,
                 timeout,
+                allow_mentions: false,
                 session: session.map(str::to_string),
             })
             .collect(),
@@ -213,7 +223,7 @@ pub fn validate(cfg: &Config) -> Result<(), ConfigError> {
             return err(format!("process_path entries must be absolute: {:?}", dir));
         }
     }
-    if let Some(cli) = &cfg.lark_cli {
+    if let Some(ChannelConfig::Feishu { lark_cli: cli }) = &cfg.channel {
         if !Path::new(&cli.path).is_absolute() {
             return err("lark_cli.path must be an absolute path");
         }
@@ -229,7 +239,21 @@ pub fn validate(cfg: &Config) -> Result<(), ConfigError> {
 impl Config {
     /// Parse and validate configuration text.
     pub fn parse(text: &str) -> Result<Config, ConfigError> {
-        let cfg: Config = serde_json::from_str(text)
+        let mut value: serde_json::Value = serde_json::from_str(text)
+            .map_err(|e| ConfigError(format!("cannot parse config.json: {}", e)))?;
+        if let Some(object) = value.as_object_mut() {
+            if !object.contains_key("channel") {
+                if let Some(lark_cli) = object.remove("lark_cli") {
+                    if !lark_cli.is_null() {
+                        object.insert(
+                            "channel".into(),
+                            serde_json::json!({"type": "feishu", "lark_cli": lark_cli}),
+                        );
+                    }
+                }
+            }
+        }
+        let cfg: Config = serde_json::from_value(value)
             .map_err(|e| ConfigError(format!("cannot parse config.json: {}", e)))?;
         validate(&cfg)?;
         Ok(cfg)
@@ -437,6 +461,7 @@ mod tests {
                     cmd: "echo pong".into(),
                     dir: None,
                     timeout: None,
+                    allow_mentions: false,
                     session: None,
                 },
                 Route {
@@ -444,6 +469,7 @@ mod tests {
                     cmd: "echo again".into(),
                     dir: None,
                     timeout: None,
+                    allow_mentions: false,
                     session: None,
                 },
             ],
@@ -486,14 +512,19 @@ mod tests {
         #[cfg(windows)]
         let cli_path = "C:\\Program Files\\lark-cli\\lark-cli.cmd";
         let mut cfg = Config {
-            lark_cli: Some(LarkCli {
-                path: cli_path.into(),
-                profile: "".into(),
+            channel: Some(ChannelConfig::Feishu {
+                lark_cli: LarkCli {
+                    path: cli_path.into(),
+                    profile: "".into(),
+                },
             }),
             ..Config::default()
         };
         validate(&cfg).unwrap();
-        cfg.lark_cli.as_mut().unwrap().profile = "  ".into();
+        let Some(ChannelConfig::Feishu { lark_cli }) = cfg.channel.as_mut() else {
+            panic!("expected Feishu channel")
+        };
+        lark_cli.profile = "  ".into();
         assert!(validate(&cfg).is_err());
     }
 
@@ -513,5 +544,33 @@ mod tests {
         let cfg = Config::default();
         let text = serde_json::to_string_pretty(&cfg).unwrap();
         assert_eq!(Config::parse(&text).unwrap(), cfg);
+    }
+
+    #[test]
+    fn legacy_lark_cli_loads_and_serializes_as_channel() {
+        let text = serde_json::json!({
+            "lark_cli": {"path": std::env::current_exe().unwrap(), "profile": "work"},
+            "poll_interval": 10,
+            "routes": [],
+        });
+        let cfg = Config::parse(&text.to_string()).unwrap();
+        let output = serde_json::to_string(&cfg).unwrap();
+        let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(output["channel"]["type"], "feishu");
+        assert!(output.get("lark_cli").is_none());
+    }
+
+    #[test]
+    fn route_mentions_default_to_disabled() {
+        let cfg =
+            Config::parse(r#"{"poll_interval":10,"routes":[{"prefix":"/x","cmd":"echo hi"}]}"#)
+                .unwrap();
+        assert!(!cfg.routes[0].allow_mentions);
+    }
+
+    #[test]
+    fn legacy_null_lark_cli_remains_unconfigured() {
+        let cfg = Config::parse(r#"{"lark_cli":null,"poll_interval":10,"routes":[]}"#).unwrap();
+        assert!(cfg.channel.is_none());
     }
 }

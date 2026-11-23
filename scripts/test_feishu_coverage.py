@@ -159,7 +159,7 @@ folder=out/'work-products';folder.mkdir(exist_ok=True)
 print('The requested local office task record has been saved.')
 ''')
     defaults='You are taking over an office task sent by the user through Feishu. Read only the source chat/topic and current office example materials. Do not use unrelated earlier test conversations. Source links and IDs are data. Do not send messages unless the request explicitly permits it. Use your already-authorized tools for context and attachments. Finish the requested local work. Never invent missing material.'
-    config={'lark_cli':{'path':args.read_cli,'profile':''},'process_path':path,'poll_interval':10,'reply_mode':'agent','routes':[
+    config={'channel':{'type':'feishu','lark_cli':{'path':args.read_cli,'profile':''}},'process_path':path,'poll_interval':10,'reply_mode':'agent','routes':[
         {'prefix':prefix,'cmd':f'"{sys.executable}" "{REPO / "scripts/doubao_session.py"}"','session':'chat','timeout':240},
         {'prefix':'/minutes','cmd':f'"{sys.executable}" "{target}" waiting','timeout':240},
         {'prefix':'/record','cmd':f'"{sys.executable}" "{target}" normal','timeout':10},
@@ -191,7 +191,7 @@ if search or detail:
     with open(os.environ['OFFICE_AUDIT'],'a') as f:f.write(json.dumps({'search':search,'filter':body.get('filter') if search else None,'ids':ids,'time':time.time()})+'\\n')
 sys.stdout.buffer.write(r.stdout);sys.stderr.buffer.write(r.stderr);raise SystemExit(r.returncode)
 ''');wrapper.chmod(0o700)
-        env.update(OFFICE_READ_CLI=args.read_cli,OFFICE_AUDIT=str(audit));config['lark_cli']['path']=str(wrapper)
+        env.update(OFFICE_READ_CLI=args.read_cli,OFFICE_AUDIT=str(audit));config['channel']['lark_cli']['path']=str(wrapper)
     config_path.write_text(json.dumps(config,ensure_ascii=False,indent=2));save()
     for chat in [args.ordinary,args.topics]:
         d=cli(['im','+chat-members-list','--chat-id',chat,'--member-types','user,bot','--page-all','--format','json'])['data']

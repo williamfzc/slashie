@@ -11,7 +11,7 @@ use std::path::Path;
 
 const ROUTE_USAGE: &str = "usage:\n  \
      slashie route list\n  \
-     slashie route add <PREFIX> --cmd <COMMAND> [--dir <PATH>] [--timeout <SECS>] [--session chat]\n  \
+     slashie route add <PREFIX> --cmd <COMMAND> [--dir <PATH>] [--timeout <SECS>] [--session chat] [--allow-mentions]\n  \
      slashie route remove <PREFIX>";
 
 const LOG_USAGE: &str = "usage:\n  \
@@ -44,6 +44,7 @@ fn add(home: &Path, args: &mut impl Iterator<Item = String>) -> Result<String, S
     let mut cmd: Option<String> = None;
     let mut dir: Option<String> = None;
     let mut timeout: Option<u64> = None;
+    let mut allow_mentions = false;
     let mut session: Option<String> = None;
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -59,6 +60,7 @@ fn add(home: &Path, args: &mut impl Iterator<Item = String>) -> Result<String, S
                 })?);
             }
             "--session" => session = Some(next_value(args, "--session")?),
+            "--allow-mentions" => allow_mentions = true,
             other => {
                 return Err(format!(
                     "unknown route add flag {:?}\n{}",
@@ -88,6 +90,7 @@ fn add(home: &Path, args: &mut impl Iterator<Item = String>) -> Result<String, S
         cmd,
         dir,
         timeout,
+        allow_mentions,
         session,
     });
     save_config(home, &cfg)?;
@@ -209,14 +212,14 @@ pub fn skill(home: &Path) -> String {
          \n\
          - Runtime directory: {}\n\
          - `config.json` in it holds all settings: routes, the poll interval, and\n\
-         the Lark CLI binding. `state.json` records the polling on/off setting,\n\
+         the Feishu binding at `channel.lark_cli`. `state.json` records the polling on/off setting,\n\
          durable per-message claims, and conversation session mappings.\n\
          `slashie.log` is the operational log; read it with `slashie log`.\n\
          \n\
          # Commands\n\
          \n\
          - `slashie route list` - print the route table as JSON.\n\
-         - `slashie route add <PREFIX> --cmd <COMMAND> [--dir <PATH>] [--timeout <SECS>] [--session chat]`\n\
+         - `slashie route add <PREFIX> --cmd <COMMAND> [--dir <PATH>] [--timeout <SECS>] [--session chat] [--allow-mentions]`\n\
          - `slashie route remove <PREFIX>`\n\
          - `slashie log [--last N] [--id MESSAGE_ID]` - print recent operational log\n\
          entries (timestamps, IDs, outcomes); works while Slashie is running.\n\
@@ -234,6 +237,9 @@ pub fn skill(home: &Path) -> String {
          - `--session chat` keeps one agent session per Feishu conversation; the\n\
          command then runs in a Slashie-owned workspace with `$SLASHIE_CONTINUE`\n\
          set to `1` when it may resume. It cannot be combined with `--dir`.\n\
+         - `--allow-mentions` lets other users run this route by sending\n\
+         `@you /command` in any searchable group. Enable it only for commands\n\
+         suitable for other group members to run with your local permissions.\n\
          \n\
          # Behavior\n\
          \n\
@@ -283,6 +289,7 @@ mod tests {
                 "cd ~/app && ./deploy.sh",
                 "--timeout",
                 "120",
+                "--allow-mentions",
             ],
         )
         .unwrap();
@@ -313,6 +320,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("route {} missing", prefix))
         };
         assert_eq!(find("/deploy").timeout, Some(120));
+        assert!(find("/deploy").allow_mentions);
         assert_eq!(find("/deploy").cmd, "cd ~/app && ./deploy.sh");
         assert_eq!(find("/ask").session.as_deref(), Some("chat"));
 

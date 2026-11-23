@@ -8,7 +8,7 @@ source = (repo / 'src/app/assets/index.html').read_text()
 bridge = '''<script>
 window.fixture = {
   runtime: {polling:true, can_toggle:true, receive_status:'verified', reply_status:'blocked', last_scan_ms:Date.now(), pending_jobs:0, scanning:false, next_scan_in_secs:6, status_text:null},
-  settings: {config_text:JSON.stringify({poll_interval:10,routes:[{prefix:'/doubao',cmd:'python3 scripts/doubao_session.py',timeout:90,session:'chat'}]}),identity:'synthetic',identity_status:'connected',log_available:true,config_unparsable:false},
+  settings: {config_text:JSON.stringify({poll_interval:10,routes:[{prefix:'/doubao',cmd:'python3 scripts/doubao_session.py',timeout:90,allow_mentions:false,session:'chat'}]}),identity:'synthetic',identity_status:'connected',log_available:true,config_unparsable:false},
   calls:[], delay:0, failAction:false, failRefresh:false
 };
 window.__TAURI__ = {core:{invoke:async function(name,args){

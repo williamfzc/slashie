@@ -14,6 +14,9 @@ pub struct Message {
     pub id: String,
     /// Sender open_id.
     pub sender: String,
+    /// Whether the channel verified that the sender is a user account.
+    #[serde(default)]
+    pub sender_is_user: bool,
     pub created_at_ms: i64,
     /// "p2p" or "group" (mock-shaped; the real adapter decodes placement).
     pub chat_type: String,
@@ -26,6 +29,12 @@ pub struct Message {
     pub topic_id: Option<String>,
     /// Decoded text body for text messages; None for non-text messages.
     pub text: Option<String>,
+    /// The resolved user ID for a leading mention, if the channel verified one.
+    #[serde(default)]
+    pub leading_mention: Option<String>,
+    /// Text after the verified leading mention.
+    #[serde(default)]
+    pub mention_command: Option<String>,
     /// Validated placement: true when the message is top-level (no root/parent).
     pub top_level: bool,
     pub recalled: bool,
@@ -128,6 +137,16 @@ pub trait Channel: Send + Sync {
     /// Search message IDs in [from_ms, to_ms]. Returns IDs only, in the order
     /// the backend provides; ordering and dedup happen in the runtime.
     fn search(&self, from_ms: i64, to_ms: i64) -> Result<Vec<String>, TransportError>;
+
+    /// Include candidate messages addressed to the bound user when requested.
+    fn search_with_mentions(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+        _include_mentions: bool,
+    ) -> Result<Vec<String>, TransportError> {
+        self.search(from_ms, to_ms)
+    }
 
     /// Fetch details for the given IDs. Missing IDs mean an incomplete result.
     fn mget(&self, ids: &[String]) -> Result<Vec<Message>, TransportError>;
@@ -423,11 +442,14 @@ mod tests {
         Message {
             id: id.into(),
             sender: "ou_self".into(),
+            sender_is_user: true,
             created_at_ms: ts,
             chat_type: "p2p".into(),
             chat_id: "oc_test".into(),
             topic_id: None,
             text: Some("/ping".into()),
+            leading_mention: None,
+            mention_command: None,
             top_level: true,
             recalled: false,
             link: None,

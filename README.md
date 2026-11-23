@@ -22,7 +22,7 @@ No bots, no webhooks, no servers: Slashie polls through [Lark CLI](https://githu
 ## Quick start
 
 1. Install the [Lark CLI](https://github.com/larksuite/cli) and authenticate: `lark-cli login`. Note its absolute path.
-2. Launch Slashie. First run creates `~/.slashie/config.json` with starter routes (`/ping`, `/pi`, `/claude`, `/codex`) and opens Settings; set `lark_cli.path` there, then restart.
+2. Launch Slashie. First run creates `~/.slashie/config.json` with starter routes (`/ping`, `/pi`, `/claude`, `/codex`) and opens Settings; set `channel.lark_cli.path` there, then restart.
 3. Enable `Polling` from the menu-bar icon.
 4. Send `/ping hello` in any Feishu chat your account can reach.
 
@@ -48,6 +48,8 @@ Or open Settings and hit **Edit Config** — the window can inspect and save val
 ```sh
 slashie --skill
 ```
+
+To let others run a specific command by mentioning you in a group, see [mention triggers](docs/product.md#trigger-and-reply).
 
 ## Reset or uninstall
 

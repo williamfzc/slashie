@@ -46,6 +46,95 @@ pub struct LarkCliTransport {
 }
 
 impl LarkCliTransport {
+    fn search_filtered(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+        mut filter: Value,
+    ) -> Result<Vec<String>, TransportError> {
+        let groups_only = filter.get("chat_type").and_then(Value::as_str) == Some("group");
+        filter["time_range"] = json!({
+            "start_time": rfc3339_secs_floor(from_ms),
+            "end_time": rfc3339_secs_ceil(to_ms),
+        });
+        let body = json!({ "query": "", "filter": filter }).to_string();
+        let mut ids = Vec::new();
+        let mut page_token: Option<String> = None;
+        for _page in 0..MAX_PAGES {
+            // Live-verified wire shape: page_size/page_token ride in the URL
+            // query (--params; a body page_token repeats page 1), the time
+            // range keys are start_time/end_time, and fractional seconds are
+            // rejected, so the window is rounded out to whole seconds
+            // (start down, end up); exact-millisecond admission stays local.
+            let mut params = json!({ "page_size": SEARCH_PAGE_SIZE });
+            if let Some(token) = &page_token {
+                params["page_token"] = json!(token);
+            }
+            let envelope = self
+                .run_json(
+                    &[
+                        "api",
+                        "POST",
+                        "/open-apis/im/v1/messages/search",
+                        "--as",
+                        "user",
+                        "--params",
+                        &params.to_string(),
+                        "--data",
+                        "-",
+                    ],
+                    Some(&body),
+                    self.timeout_ms,
+                )
+                .map_err(cli_failure_to_transport)?;
+            let data = api_data(&envelope)?;
+            for item in data
+                .get("items")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| TransportError::Incomplete("search has no items".into()))?
+            {
+                // Raw mget does not carry chat type. Search metadata must
+                // confirm that a mention hit is in a group before fetching it.
+                if groups_only
+                    && item
+                        .pointer("/meta_data/is_p2p_chat")
+                        .and_then(Value::as_bool)
+                        != Some(false)
+                {
+                    continue;
+                }
+                let id = item
+                    .pointer("/meta_data/message_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        TransportError::Incomplete("search item has no message_id".into())
+                    })?;
+                ids.push(id.to_string());
+            }
+            let has_more = data
+                .get("has_more")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !has_more {
+                return Ok(ids);
+            }
+            page_token = Some(
+                data.get("page_token")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        TransportError::Incomplete("has_more without page_token".into())
+                    })?
+                    .to_string(),
+            );
+        }
+        // Too many pages for one window: block this scan rather than admit a
+        // partial result.
+        Err(TransportError::Incomplete(format!(
+            "search exceeded {} pages",
+            MAX_PAGES
+        )))
+    }
+
     pub fn new(
         cli: &LarkCli,
         process_path: &[String],
@@ -417,8 +506,7 @@ fn classify_api_code(code: i64, message: &str) -> TransportError {
 
 /// Parse one mget/search item into the runtime Message shape.
 /// Placement is verified locally: root_id/parent_id present means a reply.
-/// The recalled field's live wire shape is pinned during live acceptance;
-/// fixtures may set it explicitly.
+/// The API marks recalled messages as deleted.
 fn parse_item(item: &Value) -> Result<Message, String> {
     let id = item
         .get("message_id")
@@ -430,8 +518,10 @@ fn parse_item(item: &Value) -> Result<Message, String> {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    // Sender kind is not validated here: eligibility comes from the runtime's
-    // identity comparison, and unknown kinds simply never match.
+    let sender_is_user = item.pointer("/sender/sender_type").and_then(Value::as_str)
+        == Some("user")
+        && item.pointer("/sender/id_type").and_then(Value::as_str) == Some("open_id")
+        && !sender.is_empty();
     let create_time: i64 = item
         .get("create_time")
         .and_then(|v| {
@@ -476,25 +566,56 @@ fn parse_item(item: &Value) -> Result<Message, String> {
         .and_then(|v| v.as_str())
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string());
+    let mention = text.as_deref().and_then(|text| leading_mention(item, text));
+    let (leading_mention, mention_command) = mention.unzip();
     Ok(Message {
         id,
         sender,
+        sender_is_user,
         created_at_ms: create_time,
         chat_type,
         chat_id,
         topic_id,
         text,
+        leading_mention,
+        mention_command,
         top_level: root.is_empty() && parent.is_empty(),
-        recalled: item
-            .get("recalled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        recalled: ["deleted", "recalled"]
+            .iter()
+            .any(|field| item.get(field).and_then(Value::as_bool) == Some(true)),
         link: item
             .get("message_app_link")
             .and_then(Value::as_str)
             .filter(|link| !link.is_empty())
             .map(str::to_string),
     })
+}
+
+fn leading_mention(item: &Value, text: &str) -> Option<(String, String)> {
+    let text = text.trim_start();
+    let (key, command) = text.split_once(char::is_whitespace)?;
+    let index = key.strip_prefix("@_user_")?;
+    if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    // A typed copy of the placeholder could otherwise stand in for a later mention.
+    if command.contains(key) {
+        return None;
+    }
+    let mut matches = item
+        .get("mentions")?
+        .as_array()?
+        .iter()
+        .filter(|mention| mention.get("key").and_then(Value::as_str) == Some(key));
+    let mention = matches.next()?;
+    if matches.next().is_some() || mention.get("id_type")?.as_str()? != "open_id" {
+        return None;
+    }
+    let id = mention.get("id")?.as_str()?;
+    if !id.starts_with("ou_") {
+        return None;
+    }
+    Some((id.to_string(), command.trim_start().to_string()))
 }
 
 impl Channel for LarkCliTransport {
@@ -561,91 +682,30 @@ impl Channel for LarkCliTransport {
     }
 
     fn search(&self, from_ms: i64, to_ms: i64) -> Result<Vec<String>, TransportError> {
-        let self_id = {
-            // from_ids requires the bound open_id; the runtime only scans
-            // with a bound identity, so read it from the identity call site
-            // via a stored copy.
-            self.self_id
-                .lock()
-                .unwrap()
-                .clone()
-                .ok_or_else(|| TransportError::Fatal("search before identity binding".into()))?
-        };
-        let mut ids = Vec::new();
-        let mut page_token: Option<String> = None;
-        for _page in 0..MAX_PAGES {
-            // Live-verified wire shape: page_size/page_token ride in the URL
-            // query (--params; a body page_token repeats page 1), the time
-            // range keys are start_time/end_time, and fractional seconds are
-            // rejected, so the window is rounded out to whole seconds
-            // (start down, end up); exact-millisecond admission stays local.
-            let body = json!({
-                "query": "",
-                "filter": {
-                    "from_ids": [self_id],
-                    "time_range": {
-                        "start_time": rfc3339_secs_floor(from_ms),
-                        "end_time": rfc3339_secs_ceil(to_ms),
-                    }
-                }
-            });
-            let mut params = json!({ "page_size": SEARCH_PAGE_SIZE });
-            if let Some(token) = &page_token {
-                params["page_token"] = json!(token);
-            }
-            let envelope = self
-                .run_json(
-                    &[
-                        "api",
-                        "POST",
-                        "/open-apis/im/v1/messages/search",
-                        "--as",
-                        "user",
-                        "--params",
-                        &params.to_string(),
-                        "--data",
-                        "-",
-                    ],
-                    Some(&body.to_string()),
-                    self.timeout_ms,
-                )
-                .map_err(cli_failure_to_transport)?;
-            let data = api_data(&envelope)?;
-            for item in data
-                .get("items")
-                .and_then(|v| v.as_array())
-                .ok_or_else(|| TransportError::Incomplete("search has no items".into()))?
-            {
-                let id = item
-                    .pointer("/meta_data/message_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        TransportError::Incomplete("search item has no message_id".into())
-                    })?;
-                ids.push(id.to_string());
-            }
-            let has_more = data
-                .get("has_more")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if !has_more {
-                return Ok(ids);
-            }
-            page_token = Some(
-                data.get("page_token")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        TransportError::Incomplete("has_more without page_token".into())
-                    })?
-                    .to_string(),
-            );
+        let self_id = self
+            .self_id
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| TransportError::Fatal("search before identity binding".into()))?;
+        self.search_filtered(from_ms, to_ms, json!({ "from_ids": [self_id] }))
+    }
+
+    fn search_with_mentions(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+        include_mentions: bool,
+    ) -> Result<Vec<String>, TransportError> {
+        let mut ids = self.search(from_ms, to_ms)?;
+        if include_mentions {
+            ids.extend(self.search_filtered(
+                from_ms,
+                to_ms,
+                json!({ "is_at_me": true, "chat_type": "group", "from_types": ["user"] }),
+            )?);
         }
-        // Too many pages for one window: block this scan rather than admit a
-        // partial result.
-        Err(TransportError::Incomplete(format!(
-            "search exceeded {} pages",
-            MAX_PAGES
-        )))
+        Ok(ids)
     }
 
     fn mget(&self, ids: &[String]) -> Result<Vec<Message>, TransportError> {
@@ -856,8 +916,6 @@ if args[:2] == ["contact", "+get-user"]:
 
 if args[:3] == ["api", "POST", "/open-apis/im/v1/messages/search"]:
     body = stdin_arg("--data")
-    # Every page must restrict search at the server, before details are read.
-    assert body.get("filter", {}).get("from_ids") == ["ou_verified"]
     # Live-verified wire shape: pagination rides in --params, and the body
     # time range uses start_time/end_time with second precision.
     params_arg = args[args.index("--params") + 1] if "--params" in args else "{}"
@@ -874,6 +932,17 @@ if args[:3] == ["api", "POST", "/open-apis/im/v1/messages/search"]:
     if "page_token" in body:
         # A body page_token repeats page 1 (live-verified pagination trap).
         sys.exit(0)
+    if body["filter"].get("is_at_me"):
+        assert body["query"] == ""
+        assert body["filter"]["chat_type"] == "group"
+        assert body["filter"]["from_types"] == ["user"]
+        assert "from_ids" not in body["filter"]
+        print(json.dumps({"code": 0, "data": {"items": [
+            {"meta_data": {"message_id": "om_mention", "is_p2p_chat": False}},
+            {"meta_data": {"message_id": "om_direct_mention", "is_p2p_chat": True}},
+            {"meta_data": {"message_id": "om_unknown_mention"}}], "has_more": False}}))
+        sys.exit(0)
+    assert body["filter"].get("from_ids") == ["ou_verified"]
     # Mode markers ride in the day-of-month of the start date.
     mode = start.split("T")[0]
     if mode.startswith("1970-01-"):
@@ -1130,6 +1199,53 @@ sys.exit(0)
         // Page 1 (2 ids) + page 2 (1 id); the runtime dedups afterwards.
         assert_eq!(ids, vec!["om_page1", "om_dup", "om_page2"]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn mention_search_is_additive_and_opt_in() {
+        let dir = tmp("mention_search");
+        let t = transport_in(&dir, "test");
+        t.set_self_id("ou_verified");
+        let start = 10 * 86_400_000;
+        let end = 11 * 86_400_000;
+        let own = t.search_with_mentions(start, end, false).unwrap();
+        assert_eq!(own, ["om_page1", "om_dup", "om_page2"]);
+        let both = t.search_with_mentions(start, end, true).unwrap();
+        assert_eq!(both, ["om_page1", "om_dup", "om_page2", "om_mention"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn detail_requires_a_verified_unambiguous_leading_mention() {
+        let mut item = json!({
+            "message_id": "om_mention", "msg_type": "text", "create_time": "1000",
+            "chat_type": "group", "chat_id": "oc_test",
+            "sender": {"id": "ou_other", "id_type": "open_id", "sender_type": "user"},
+            "body": {"content": json!({"text": "@_user_1 /ping a\nb"}).to_string()},
+            "mentions": [{"key": "@_user_1", "id": "ou_verified", "id_type": "open_id"}],
+        });
+        let parsed = parse_item(&item).unwrap();
+        assert!(parsed.sender_is_user);
+        assert_eq!(parsed.leading_mention.as_deref(), Some("ou_verified"));
+        assert_eq!(parsed.mention_command.as_deref(), Some("/ping a\nb"));
+        for text in [
+            "@Owner /ping",
+            "@_user_11 /ping",
+            "@_user_1/ping",
+            "@_user_1 /ping @_user_1",
+            "/ping @_user_1",
+        ] {
+            item["body"]["content"] = json!(json!({"text": text}).to_string());
+            assert_eq!(parse_item(&item).unwrap().leading_mention, None, "{text}");
+        }
+        item["body"]["content"] = json!(json!({"text": "@_user_1 /ping"}).to_string());
+        item["mentions"] = json!([]);
+        item["sender"]["sender_type"] = json!("app");
+        item["deleted"] = json!(true);
+        let parsed = parse_item(&item).unwrap();
+        assert_eq!(parsed.leading_mention, None);
+        assert!(!parsed.sender_is_user);
+        assert!(parsed.recalled);
     }
 
     #[test]

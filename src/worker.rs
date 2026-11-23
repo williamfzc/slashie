@@ -63,7 +63,12 @@ pub struct CommandInputs {
 }
 
 pub fn build_inputs(route_prefix: &str, msg: &Message, key: &ConversationKey) -> CommandInputs {
-    let text = msg.text.clone().unwrap_or_default();
+    let original = msg.text.as_deref().unwrap_or_default();
+    let text = if original.split_whitespace().next() == Some(route_prefix) {
+        original
+    } else {
+        msg.mention_command.as_deref().unwrap_or(original)
+    };
     let args = text
         .split_once(route_prefix)
         .map(|(_, rest)| rest.to_string())
@@ -385,6 +390,7 @@ mod tests {
             cmd: cmd.into(),
             dir: None,
             timeout: None,
+            allow_mentions: false,
             session: None,
         }
     }
@@ -399,6 +405,9 @@ mod tests {
             chat_id: "oc_test".into(),
             topic_id: None,
             text: Some("/t line1\nline2\nline3".into()),
+            sender_is_user: true,
+            leading_mention: None,
+            mention_command: None,
             top_level: true,
             recalled: false,
             link: Some("https://example.example/msg".into()),
@@ -422,6 +431,33 @@ mod tests {
         assert!(inputs.source.contains("sender: ou_self"));
         assert_eq!(inputs.id, "om_1");
         assert_eq!(inputs.link, "https://example.example/msg");
+    }
+
+    #[test]
+    fn mention_inputs_strip_only_the_verified_command_prefix() {
+        let msg = Message {
+            id: "om_mention".into(),
+            sender: "ou_friend".into(),
+            sender_is_user: true,
+            created_at_ms: 0,
+            chat_type: "group".into(),
+            chat_id: "oc_test".into(),
+            topic_id: None,
+            text: Some("@_user_1 /t do this".into()),
+            leading_mention: Some("ou_self".into()),
+            mention_command: Some("/t do this".into()),
+            top_level: true,
+            recalled: false,
+            link: None,
+        };
+        let key = ConversationKey {
+            channel: "feishu".into(),
+            chat_id: "oc_test".into(),
+            topic_id: None,
+        };
+        let inputs = build_inputs("/t", &msg, &key);
+        assert_eq!(inputs.args, " do this");
+        assert!(inputs.source.contains("sender: ou_friend"));
     }
 
     #[test]

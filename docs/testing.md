@@ -27,6 +27,7 @@ Two layers, by [design](DESIGN.md):
 | User story | Guarding tests |
 | --- | --- |
 | Exact prefix match; `/pingpong` never matches `/ping` | `runtime::admission_rules_exact_prefix_only`, `config::rejects_blank_command_and_bad_prefix` |
+| Opted-in routes accept a real leading mention of the bound user across groups and topics | `lark::mention_search_is_additive_and_opt_in`, `lark::detail_requires_a_verified_unambiguous_leading_mention`, `runtime::mentions_require_opt_in_bound_account_and_group_scope`, `worker::mention_inputs_strip_only_the_verified_command_prefix` |
 | Multiline arguments arrive as one value, line breaks preserved | `worker::multiline_args_arrive_as_one_value`, `worker::inputs_preserve_multiline_and_source`, `runtime::multiline_and_metacharacters_reach_worker_as_data` |
 | Topic root and topic replies eligible; ordinary replies ignored; groups like DMs | `runtime::topic_replies_are_admitted_but_plain_replies_are_not`, `runtime::group_shaped_messages_are_eligible_like_p2p` |
 | Slashie's own delivered replies never execute | `runtime::own_reply_id_is_never_admitted_again` |

@@ -312,11 +312,14 @@ mod tests {
             message: Message {
                 id: format!("om_{}", tag),
                 sender: "ou_self".into(),
+                sender_is_user: true,
                 created_at_ms: 0,
                 chat_type: "p2p".into(),
                 chat_id: key(chat).chat_id,
                 topic_id: None,
                 text: Some(format!("/ping {}", tag)),
+                leading_mention: None,
+                mention_command: None,
                 top_level: true,
                 recalled: false,
                 link: None,
@@ -326,6 +329,7 @@ mod tests {
                 cmd: "echo pong".into(),
                 dir: None,
                 timeout: None,
+                allow_mentions: false,
                 session: None,
             },
         }
