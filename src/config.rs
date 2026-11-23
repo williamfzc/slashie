@@ -95,7 +95,7 @@ pub struct Config {
     pub channel: Option<ChannelConfig>,
     #[serde(default)]
     pub process_path: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "default_poll_interval")]
     pub poll_interval: u64,
     #[serde(default)]
     pub routes: Vec<Route>,
@@ -152,6 +152,12 @@ if [ "$SLASHIE_CONTINUE" = 1 ]; then printf '%s' "$SLASHIE_PROMPT" | "$tool" -p 
             .collect(),
         }
     }
+}
+
+/// An omitted `poll_interval` falls back to the documented default; the
+/// type's own zero would fail validation.
+fn default_poll_interval() -> u64 {
+    DEFAULT_POLL_INTERVAL
 }
 
 #[derive(Debug, PartialEq)]
@@ -418,6 +424,12 @@ mod tests {
             ..Config::default()
         };
         assert!(validate(&cfg).is_ok());
+    }
+
+    #[test]
+    fn omitted_poll_interval_defaults_to_five() {
+        let cfg = Config::parse(r#"{"routes":[]}"#).unwrap();
+        assert_eq!(cfg.poll_interval, DEFAULT_POLL_INTERVAL);
     }
 
     #[test]
