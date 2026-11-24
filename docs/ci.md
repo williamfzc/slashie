@@ -24,5 +24,6 @@ Rust dependencies are locked through the committed `Cargo.lock`.
 A separate workflow (`.github/workflows/release.yml`) runs only when a `v*`
 tag is pushed. It publishes a GitHub Release with five artifacts: the macOS
 `.app` bundle and DMG, and headless CLI binaries for Linux (x86_64),
-macOS (aarch64), and Windows (x86_64). Release versions come from the tag;
-nothing installable is produced by ordinary pushes.
+macOS (aarch64), and Windows (x86_64). The packages include the project's
+[MIT license](../LICENSE). Keep the tag, Cargo package, and Tauri bundle at
+the same version. Ordinary pushes run CI without building release packages.

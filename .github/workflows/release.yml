@@ -72,7 +72,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p staging
           tar -czf "staging/slashie_${VERSION}_x86_64_linux.tar.gz" \
-            -C target/release slashie
+            -C "$PWD/target/release" slashie -C "$PWD" LICENSE
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -95,7 +95,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p staging
           tar -czf "staging/slashie_${VERSION}_aarch64_macos.tar.gz" \
-            -C target/release slashie
+            -C "$PWD/target/release" slashie -C "$PWD" LICENSE
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -118,7 +118,7 @@ jobs:
         run: |
           $version = $env:GITHUB_REF_NAME.Substring(1)
           New-Item -ItemType Directory -Force -Path staging | Out-Null
-          Compress-Archive -Path target/release/slashie.exe `
+          Compress-Archive -Path target/release/slashie.exe, LICENSE `
             -DestinationPath "staging/slashie_${version}_x86_64_windows.zip"
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -146,5 +146,6 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Slashie $GITHUB_REF_NAME" \
+            --verify-tag \
             --generate-notes \
             staging/*

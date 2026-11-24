@@ -1,8 +1,9 @@
 [package]
 name = "slashie"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Send a slash command in Feishu, run it locally, reply with the outcome."
+license = "MIT"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
