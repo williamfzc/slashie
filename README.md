@@ -40,7 +40,7 @@ Note the absolute path to `lark-cli` and the profile you signed in with. [Instal
 
 ### Start Slashie headless
 
-1. Put the headless `slashie` binary on your `PATH`. On Windows, use `slashie.exe` and ensure [Git for Windows](https://gitforwindows.org/) supplies `sh` on the same `PATH`.
+1. [Install](#install-slashie) the headless `slashie` binary and put it on your `PATH`. On Windows, use `slashie.exe` and ensure [Git for Windows](https://gitforwindows.org/) supplies `sh` on the same `PATH`.
 2. Run `slashie --poll off` while Slashie is stopped to create `~/.slashie/config.json` with the starter routes. On Windows the default directory is `%USERPROFILE%\.slashie` when `HOME` is unset.
 3. Edit the [Feishu channel configuration](#configure-the-feishu-channel), then enable polling and start Slashie in the foreground.
 
@@ -79,13 +79,24 @@ Send `/ping hello` yourself in a supported Feishu chat. The default route runs `
 
 ### Install the headless binary in one command
 
-On Apple Silicon macOS or x86-64 Linux, install the latest headless binary from GitHub Releases. This command uses public GitHub downloads.
+On Apple Silicon macOS 11 or newer, or x86-64 Linux with glibc 2.39 or newer, install the latest headless binary from GitHub Releases. This command uses public GitHub downloads.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/williamfzc/slashie/main/install.sh | sh
 ```
 
 The installer puts `slashie` in `~/.local/bin`. Use `~/.local/bin/slashie --version` to confirm the installation. Add that directory to `PATH` before using the headless setup steps.
+
+The published Linux binary does not start with an older glibc, as on Ubuntu 22.04, Debian 12, or RHEL 9. Check with `ldd --version`; there, use the [build from source](#download-other-builds-or-build-from-source) steps instead.
+
+To pin a release or choose the install directory:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/williamfzc/slashie/main/install.sh | sh -s -- v0.3.1
+curl -fsSL https://raw.githubusercontent.com/williamfzc/slashie/main/install.sh | INSTALL_DIR="$HOME/bin" sh
+```
+
+`INSTALL_DIR` goes in front of `sh`, which runs the script. Run the install command again to upgrade. A failed download or archive check leaves the existing `slashie` in place.
 
 ### Download other builds or build from source
 

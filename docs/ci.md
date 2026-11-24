@@ -25,5 +25,8 @@ A separate workflow (`.github/workflows/release.yml`) runs only when a `v*`
 tag is pushed. It publishes a GitHub Release with five artifacts: the macOS
 `.app` bundle and DMG, and headless CLI binaries for Linux (x86_64),
 macOS (aarch64), and Windows (x86_64). The packages include the project's
-[MIT license](../LICENSE). Keep the tag, Cargo package, and Tauri bundle at
+[MIT license](../LICENSE). The Linux headless binary takes the glibc of the
+`ubuntu-latest` image, so it needs that glibc or newer at run time and an
+older distribution has to build from source; the README install section
+states the current floor. Keep the tag, Cargo package, and Tauri bundle at
 the same version. Ordinary pushes run CI without building release packages.
