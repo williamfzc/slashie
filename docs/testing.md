@@ -35,7 +35,7 @@ Two layers, by [design](DESIGN.md):
 | Exact source link; missing link blocks the handoff | `runtime::handoff_forwards_exact_source_link`, `lark::source_link_is_exact_and_missing_link_blocks_handoff` |
 | `OnIt` only after a durable claim; reaction failure never changes the work result | `lark::processing_reaction_targets_source_as_user`, `lark::reaction_failures_never_invent_ids_or_remove_unconfirmed_status`, `runtime::rejected_processing_reaction_still_runs_and_replies` |
 | Waiting work receives `OneSecond`, and only Slashie's confirmed queue marker is removed on start | `lark::queue_reaction_uses_supported_emoji_and_removes_only_its_id`, `runtime::first_job_is_on_it_and_later_same_chat_job_is_queued_then_cleared` |
-| `DONE` only for success; timeout/unavailable source gets `ERROR` | `runtime::timed_out_work_gets_error_not_done`, `runtime::unavailable_source_marks_error_without_starting_command`, `runtime::failed_agent_work_is_not_successful_silent_completion` |
+| [Terminal status](product.md#trigger-and-reply) reflects the work outcome | `lark::processing_reaction_targets_source_as_user`, `runtime::timed_out_work_gets_error_not_done`, `runtime::unavailable_source_marks_error_without_starting_command`, `runtime::failed_agent_work_is_not_successful_silent_completion` |
 | Status reactions independent of `reply_mode` | `runtime::software_reactions_do_not_depend_on_agent_text_delivery` |
 | `agent` mode is default; `auto` is explicit | `config::agent_delivery_is_default_and_auto_is_explicit`, `transport::reply_modes` |
 | Agent completes without text even when reactions are denied | `runtime::agent_completes_without_text_reply_even_if_reactions_are_denied` |

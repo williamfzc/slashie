@@ -791,7 +791,7 @@ impl Channel for LarkCliTransport {
         processing_id: Option<&str>,
     ) -> Result<(), TransportError> {
         // Add the truthful terminal state first; failed writes must keep OnIt.
-        self.create_reaction(source_id, if succeeded { "DONE" } else { "ERROR" })?;
+        self.create_reaction(source_id, if succeeded { "DONE" } else { "CrossMark" })?;
         if let Some(id) = processing_id {
             self.clear_acknowledgment(source_id, id)?;
         }
@@ -1020,10 +1020,14 @@ if args[:3] == ["im", "reactions", "create"]:
     assert profile in ["reaction-test", "reaction-missing-id", "reaction-terminal-denied", "reaction-delete-denied"]
     assert args[3:6] == ["--as", "user", "--params"]
     params = json.loads(args[6])
-    assert params["message_id"] == "om_reaction_source"
     assert args[7:] == ["--data", "-"]
     emoji = stdin_arg("--data")["reaction_type"]["emoji_type"]
-    assert emoji in ["OnIt", "OneSecond", "DONE", "ERROR"]
+    if params["message_id"] == "om_failed_source":
+        assert profile == "reaction-test"
+        assert emoji == "CrossMark"
+    else:
+        assert params["message_id"] == "om_reaction_source"
+        assert emoji in ["OnIt", "OneSecond", "DONE"]
     if profile == "reaction-missing-id":
         print(json.dumps({"ok": True, "data": {}})); sys.exit(0)
     if profile == "reaction-terminal-denied" and emoji != "OnIt":
@@ -1155,7 +1159,7 @@ sys.exit(0)
         assert_eq!(id.as_deref(), Some("reaction_OnIt"));
         t.react_finished("om_reaction_source", true, id.as_deref())
             .unwrap();
-        t.react_finished("om_reaction_source", false, None).unwrap();
+        t.react_finished("om_failed_source", false, None).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
