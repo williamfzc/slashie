@@ -267,10 +267,10 @@ pub fn skill(home: &Path) -> String {
          the final `slashie route list` afterwards.\n\
          - Log entries describe past work; never re-run work because of one. A\n\
          request repeats only when the user sends a fresh Feishu message.\n\
-         - Polling starts paused on a fresh install; route edits do nothing for\n\
-         intake until the operator enables `Polling` from the menu-bar icon's\n\
-         menu. `slashie --poll on|off` edits the same saved setting but only\n\
-         runs while no other Slashie instance holds the lock.\n",
+         - Polling starts paused on a fresh install. Enable `Polling` from the\n\
+         macOS menu-bar icon, or run `slashie --poll on` before starting the\n\
+         headless binary. `slashie --poll on|off` updates the saved setting\n\
+         while Slashie is stopped.\n",
         home.display()
     )
 }

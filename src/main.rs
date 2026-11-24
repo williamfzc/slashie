@@ -296,7 +296,7 @@ fn main() {
                     Err(e) => die_or_wait(
                         format!(
                             "identity verification failed: {}; authenticate the \
-                             Lark CLI (lark-cli login) and restart",
+                             Lark CLI (lark-cli auth login) and restart",
                             e
                         ),
                         status::OperatorFault::SignInToFeishu,
