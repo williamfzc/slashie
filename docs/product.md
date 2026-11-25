@@ -1,12 +1,14 @@
 ---
 type: specification
 title: Slashie product specification
-description: Feishu-to-local workflow, release scope, and acceptance criteria.
+description: Chat-to-local workflow, release scope, and acceptance criteria.
 ---
 
 # Slashie product specification
 
 Send a slash command in Feishu. Slashie finds the message under an existing authorized Lark CLI user identity, hands the request and source message link to a configured local agent or script. The agent decides whether to send through its own authorized tools; completing work without replying is valid. The intended setup is one account and one host.
+
+The headless CLI on Linux, macOS, and Windows is the primary artifact. The [macOS menu](menu-bar.md) is an experimental companion. The runtime depends on a [channel](DESIGN.md#channels), and Feishu is its first implementation, so the acceptance cases below are written against Feishu.
 
 ## Trigger and reply
 
@@ -45,7 +47,7 @@ Message text travels from Feishu to the local command as environment variables (
 | v1.1 | The macOS tray, Settings, and foreground headless mode share the Rust runtime. Local build and mock checks passed. A live self-chat test verified that a temporary `/pi` route could read a preceding Feishu message and reply correctly to the original question. Chat-session mapping is verified live with Pi and Claude Code in the self chat: a second request resumed the first conversation after a restart. Topic/thread isolation is verified live in a self-chat thread: same-topic continuation, chat-versus-topic separation, and delivered replies not re-admitted. A Feishu topic group uses the same `thread_id` fields. Codex resume remains pending. |
 | v0.2.0 validation | macOS and Linux headless routes were exercised through real Feishu with Doubao CLI 2.37.2 and Lark CLI 1.0.100. The Linux user service completed office work, topic continuations, attachment calculation, source replies, status reactions and lifecycle checks. Native macOS bundle acceptance remains pending; see the [current three-entry matrix](doubao.md#current-three-entry-acceptance). |
 
-The `/pi` context reader was part of the test harness. The shipped route interface passes a source message ID to configured commands. Release acceptance still includes the macOS bundle and native interactions, real direct-message and ordinary-group coverage, and search recall. If search cannot reliably discover requests in the release-target conversations, revisit the trigger mechanism before release.
+The `/pi` context reader was part of the test harness. The shipped route interface passes a source message ID to configured commands. Release acceptance still includes real direct-message and ordinary-group coverage and search recall. Native acceptance of the experimental macOS bundle follows the [menu](menu-bar.md#acceptance) checks and does not gate a release. If search cannot reliably discover requests in the release-target conversations, revisit the trigger mechanism before release.
 
 ## Release acceptance
 
@@ -65,4 +67,4 @@ The `/pi` context reader was part of the test harness. The shipped route interfa
 | Send two agent requests in one chat, then the same pair in another chat. Reset one workspace and send again. | The second request resumes the first session in each chat. The other chat starts a separate session. After a reset, the next request starts fresh rather than failing. |
 | Send a request to two different agent routes in one topic, then follow up with each route. | Each route keeps its own session: each follow-up resumes only that route's earlier conversation, and neither route continues the other's context. |
 | Measure repeated `/ping` round trips with an empty queue and healthy Feishu access. | Target the [polling interval](DESIGN.md#polling-and-claims) plus two seconds. Record sample count, median, maximum, and outliers due to indexing or delivery. |
-| Launch each macOS artifact, then validate the Linux service in v1.2. | Pass the [menu](menu-bar.md#acceptance) and [build and launch](DESIGN.md#desktop-build) checks. |
+| Launch the experimental macOS artifact, then validate the Linux service in v1.2. | Pass the [menu](menu-bar.md#acceptance) and [build and launch](DESIGN.md#desktop-build) checks. |

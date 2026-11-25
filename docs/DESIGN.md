@@ -6,7 +6,7 @@ description: Shared Rust runtime, constrained Feishu adapter, and durable claims
 
 # Slashie technical design
 
-The [product specification](product.md) owns user-visible behavior. The [menu bar specification](menu-bar.md) owns native menu interactions and copy.
+The [product specification](product.md) owns user-visible behavior. The [menu bar specification](menu-bar.md) covers the experimental macOS app and owns its native menu interactions and copy.
 
 ## Runtime
 
@@ -34,7 +34,7 @@ Use Tauri 2 for the macOS shell. Keep the Tauri bundle version aligned with the 
 
 | Artifact | Build and acceptance |
 | --- | --- |
-| macOS bundle | `cargo tauri build --features tray --bundles app,dmg`. Pushing a `v*` tag builds the bundle through the release workflow and publishes it on a GitHub Release. Run the [menu acceptance checks](menu-bar.md#acceptance) on the installed bundle. |
+| macOS bundle (experimental) | `cargo tauri build --features tray --bundles app,dmg`. Pushing a `v*` tag builds the bundle through the release workflow and publishes it on a GitHub Release. Run the [menu acceptance checks](menu-bar.md#acceptance) on the installed bundle. |
 | Headless binary | `cargo build --release --no-default-features` on Linux, macOS (aarch64), and Windows (x86_64). Inspect `cargo tree --no-default-features --edges normal,build` for GUI dependencies. Build and run on Linux without a display session. Windows acceptance beyond CI is pending live validation. |
 | Shared runtime | Run the same controlled search and `/ping` cases through both artifacts (bundle and headless binary). Check lock contention and verify that switching artifacts preserves the polling setting and durable claims. |
 

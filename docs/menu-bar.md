@@ -1,12 +1,12 @@
 ---
 type: design
 title: Slashie menu bar and settings
-description: Native macOS menu, single settings window, status copy, and acceptance checks.
+description: Experimental native macOS menu, single settings window, status copy, and acceptance checks.
 ---
 
 # Slashie menu bar and settings
 
-Feishu carries requests and results. The menu bar controls polling, and Settings holds the options that change less often.
+The menu bar and Settings are an experimental macOS companion to the CLI, which is the primary way to run Slashie. Feishu carries requests and results. The menu bar controls polling, and Settings holds the options that change less often.
 
 ## Status item and menu
 
