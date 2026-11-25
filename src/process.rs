@@ -85,9 +85,17 @@ mod tests {
         isolate(&mut cmd);
         let mut child = cmd.spawn().unwrap();
         terminate_tree(&mut child);
-        // terminate_tree returned, so the tree was observed to exit; the
-        // direct child must be reapable immediately.
-        let status = child.try_wait().unwrap();
+        // terminate_tree returned once the group could no longer be
+        // signalled. On macOS a terminated process stays that way for a
+        // moment before it is reapable: `kill(-pgid, 0)` fails with EPERM
+        // before the child turns into a zombie. Let the status settle
+        // instead of demanding it in the same instant.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut status = child.try_wait().unwrap();
+        while status.is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+            status = child.try_wait().unwrap();
+        }
         assert!(status.is_some(), "tree did not terminate");
     }
 }
